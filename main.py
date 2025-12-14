@@ -20,8 +20,10 @@ from PyQt5 import QtCore, QtGui, QtWidgets
 # Constants
 WINDOW_TITLE = "OpenCV Capture and Label"
 CAPTURE_DIR = Path("captures")
+NULL_DIR = CAPTURE_DIR / "null"
 CLASSES_PATH = Path("classes.txt")
 CLASS_COLORS_PATH = Path("class_colors.json")
+BUILD_DATE = datetime.fromtimestamp(Path(__file__).stat().st_mtime).strftime("%Y-%m-%d")
 DEFAULT_CLASS_COLORS = [
     (0, 255, 0),     # green
     (0, 200, 255),   # yellow-ish
@@ -104,6 +106,39 @@ def save_labels_yolo(image_path: Path, boxes: List[List[int]], image_shape) -> P
     return label_path
 
 
+def load_labels_yolo(label_path: Path, image_shape) -> List[List[int]]:
+    """Load YOLO labels and convert to pixel boxes."""
+    # Accept either a shape tuple or a numpy image array.
+    if hasattr(image_shape, "shape"):
+        height, width = image_shape.shape[:2]
+    else:
+        height, width = image_shape[:2]
+    boxes: List[List[int]] = []
+    if not label_path.exists():
+        return boxes
+    try:
+        for line in label_path.read_text(encoding="utf-8").splitlines():
+            parts = line.strip().split()
+            if len(parts) != 5:
+                continue
+            cls = int(float(parts[0]))
+            x_c, y_c, w_norm, h_norm = map(float, parts[1:5])
+            w_px = w_norm * width
+            h_px = h_norm * height
+            x1 = (x_c * width) - w_px / 2
+            y1 = (y_c * height) - h_px / 2
+            x2 = x1 + w_px
+            y2 = y1 + h_px
+            x1, y1 = max(0, int(round(x1))), max(0, int(round(y1)))
+            x2, y2 = min(width - 1, int(round(x2))), min(height - 1, int(round(y2)))
+            if x2 <= x1 or y2 <= y1:
+                continue
+            boxes.append([x1, y1, x2, y2, cls])
+    except OSError:
+        pass
+    return boxes
+
+
 def draw_text_with_bg(
     img,
     text: str,
@@ -125,7 +160,8 @@ def annotate_image(
     image_path: Path,
     classes: List[str],
     class_colors: List[Tuple[int, int, int]],
-) -> bool:
+    initial_boxes: Optional[List[List[int]]] = None,
+) -> str:
     """Open a simple OpenCV window to draw boxes and save YOLO labels.
 
     Mouse: click-drag to draw a box.
@@ -135,9 +171,10 @@ def annotate_image(
       - left/right arrows: move selection between boxes
       - u / z: undo last box
       - s: save labels and finish
+      - n: mark as null (no defects) and move capture to null folder (only when no boxes)
       - q or ESC: cancel labeling
 
-    Returns True if labels were saved, False if the user cancelled.
+    Returns one of: "saved", "null", "cancel".
     """
 
     image = cv2.imread(str(image_path))
@@ -147,6 +184,10 @@ def annotate_image(
 
     window_name = f"Annotate: {image_path.name}"
     boxes: List[List[Optional[int]]] = []  # [x1, y1, x2, y2, class_id or None]
+    if initial_boxes:
+        for b in initial_boxes:
+            if len(b) == 5:
+                boxes.append([int(b[0]), int(b[1]), int(b[2]), int(b[3]), int(b[4])])
     drawing = False
     start_point: Optional[Tuple[int, int]] = None
     current_point: Optional[Tuple[int, int]] = None
@@ -156,20 +197,64 @@ def annotate_image(
 
     img_height, img_width = image.shape[:2]
 
-    def clamp_point(x: int, y: int) -> Tuple[int, int]:
-        return max(0, min(x, img_width - 1)), max(0, min(y, img_height - 1))
+    def safe_destroy_window(name: str) -> None:
+        try:
+            cv2.destroyWindow(name)
+        except cv2.error:
+            pass
+
+    zoom_factor = 1.0
+    pan_x = 0.0
+    pan_y = 0.0
+    pan_active = False
+    pan_start_view: Optional[Tuple[int, int]] = None
+    current_view_params: Tuple[float, float, float, float] = (
+        float(img_width),
+        float(img_height),
+        float(img_width) / 2.0,
+        float(img_height) / 2.0,
+    )
+
+    def clamp_point(x: float, y: float) -> Tuple[int, int]:
+        return int(max(0, min(round(x), img_width - 1))), int(max(0, min(round(y), img_height - 1)))
+
+    def view_to_image_coords(vx: int, vy: int) -> Tuple[int, int]:
+        roi_w, roi_h, cx, cy = current_view_params
+        img_x = (vx / img_width) * roi_w + (cx - roi_w / 2.0)
+        img_y = (vy / img_height) * roi_h + (cy - roi_h / 2.0)
+        return clamp_point(img_x, img_y)
+
+    def adjust_zoom(direction: int, vx: int, vy: int) -> None:
+        nonlocal zoom_factor, pan_x, pan_y
+        if direction == 0:
+            return
+        before_zoom = zoom_factor
+        step = 1.1 if direction > 0 else (1 / 1.1)
+        zoom_factor = max(0.5, min(4.0, zoom_factor * step))
+        if abs(zoom_factor - before_zoom) < 1e-6:
+            return
+        # Keep the point under the cursor stable after zoom.
+        target_x, target_y = view_to_image_coords(vx, vy)
+        fx = vx / img_width
+        fy = vy / img_height
+        new_roi_w = img_width / zoom_factor
+        new_roi_h = img_height / zoom_factor
+        new_cx = target_x - fx * new_roi_w + new_roi_w / 2.0
+        new_cy = target_y - fy * new_roi_h + new_roi_h / 2.0
+        pan_x = new_cx - (img_width / 2.0)
+        pan_y = new_cy - (img_height / 2.0)
 
     def on_mouse(event, x, y, flags, param):  # noqa: ANN001 - OpenCV callback signature
-        nonlocal drawing, start_point, current_point, boxes, selected_index, pending_class_choice
+        nonlocal drawing, start_point, current_point, boxes, selected_index, pending_class_choice, pan_active, pan_start_view, pan_x, pan_y
         if event == cv2.EVENT_LBUTTONDOWN:
             drawing = True
-            start_point = clamp_point(x, y)
+            start_point = view_to_image_coords(x, y)
             current_point = start_point
         elif event == cv2.EVENT_MOUSEMOVE and drawing:
-            current_point = clamp_point(x, y)
+            current_point = view_to_image_coords(x, y)
         elif event == cv2.EVENT_LBUTTONUP and drawing:
             drawing = False
-            end_point = clamp_point(x, y)
+            end_point = view_to_image_coords(x, y)
             if start_point and end_point and start_point != end_point:
                 x1, y1 = start_point
                 x2, y2 = end_point
@@ -178,6 +263,23 @@ def annotate_image(
                 pending_class_choice = None
             start_point = None
             current_point = None
+        elif event == cv2.EVENT_MBUTTONDOWN:
+            pan_active = True
+            pan_start_view = (x, y)
+        elif event == cv2.EVENT_MBUTTONUP:
+            pan_active = False
+            pan_start_view = None
+        elif event == cv2.EVENT_MOUSEMOVE and pan_active and pan_start_view:
+            # Convert drag delta from view space to image-space pan.
+            dx_view = x - pan_start_view[0]
+            dy_view = y - pan_start_view[1]
+            roi_w, roi_h, _, _ = current_view_params
+            pan_x -= (dx_view * roi_w) / img_width
+            pan_y -= (dy_view * roi_h) / img_height
+            pan_start_view = (x, y)
+        elif event == cv2.EVENT_MOUSEWHEEL:
+            direction = 1 if flags > 0 else -1
+            adjust_zoom(direction, x, y)
 
     cv2.namedWindow(window_name)
     cv2.setMouseCallback(window_name, on_mouse)
@@ -188,8 +290,8 @@ def annotate_image(
 
         # If the user manually closed the annotation window, exit gracefully.
         if cv2.getWindowProperty(window_name, cv2.WND_PROP_VISIBLE) < 1:
-            cv2.destroyWindow(window_name)
-            return False
+            safe_destroy_window(window_name)
+            return "cancel"
 
         # Draw boxes and the in-progress rectangle over a copy of the image.
         canvas = image.copy()
@@ -214,19 +316,35 @@ def annotate_image(
         if drawing and start_point and current_point:
             cv2.rectangle(canvas, start_point, current_point, (0, 165, 255), 1)
 
-        # On-screen instructions for quick reference.
+        # Apply zoom/pan to produce the displayed view.
+        roi_w = int(round(img_width / zoom_factor))
+        roi_h = int(round(img_height / zoom_factor))
+        roi_w = max(1, min(img_width, roi_w))
+        roi_h = max(1, min(img_height, roi_h))
+        cx = (img_width / 2.0) + pan_x
+        cy = (img_height / 2.0) + pan_y
+        # Clamp center to keep ROI inside image bounds.
+        half_w = roi_w / 2.0
+        half_h = roi_h / 2.0
+        cx = max(half_w, min(img_width - half_w, cx))
+        cy = max(half_h, min(img_height - half_h, cy))
+        current_view_params = (float(roi_w), float(roi_h), cx, cy)
+        roi = cv2.getRectSubPix(canvas, (roi_w, roi_h), (cx, cy))
+        view = cv2.resize(roi, (img_width, img_height), interpolation=cv2.INTER_LINEAR)
+
+        # On-screen instructions for quick reference (drawn after zoom so they stay static).
         top_line = "Drag: draw box | 0-9: pick class | enter: apply to selected"
         top_stats = f"Boxes: {len(boxes)} (pending labels: {sum(1 for _, _, _, _, cls in boxes if cls is None)})"
         bottom_instructions = [
-            "<-/->: select box | u/z: undo | s: save | q/esc: cancel",
+            "<-/->: select box | u/z: undo | s: save | n: null | q/esc: cancel",
+            "scroll: zoom | mmb drag: pan",
         ]
         top_line = top_line.upper()
         top_stats = top_stats.upper()
         bottom_instructions = [line.upper() for line in bottom_instructions]
 
-        # Draw the primary instruction and stats at the top.
         draw_text_with_bg(
-            canvas,
+            view,
             top_line,
             (10, 24),
             font_scale=0.5,
@@ -234,29 +352,27 @@ def annotate_image(
             thickness=1,
         )
         draw_text_with_bg(
-            canvas,
+            view,
             top_stats,
             (10, 48),
             font_scale=0.5,
             color=(0, 255, 0),
             thickness=1,
         )
-
-        # Draw secondary instruction lines anchored near the bottom.
         line_height = 24
         y_offset = img_height - 10 - line_height * len(bottom_instructions)
         for line in bottom_instructions:
             y_offset += line_height
             draw_text_with_bg(
-                canvas,
+                view,
                 line,
                 (10, y_offset),
                 font_scale=0.5,
-                color=(0, 255, 0),  # green text for visibility
+                color=(0, 255, 0),
                 thickness=1,
             )
 
-        cv2.imshow(window_name, canvas)
+        cv2.imshow(window_name, view)
         # waitKeyEx preserves extended key codes (e.g., arrow keys)
         key = cv2.waitKeyEx(30)
 
@@ -265,11 +381,17 @@ def annotate_image(
                 print("Label all boxes with number keys before saving.")
                 continue
             save_labels_yolo(image_path, boxes, image.shape)
-            cv2.destroyWindow(window_name)
-            return True
+            safe_destroy_window(window_name)
+            return "saved"
         if key in (ord("q"), 27):
-            cv2.destroyWindow(window_name)
-            return False
+            safe_destroy_window(window_name)
+            return "cancel"
+        if key == ord("n"):
+            if boxes:
+                print("Remove boxes or undo before marking null.")
+                continue
+            safe_destroy_window(window_name)
+            return "null"
         if key in (ord("u"), ord("z")) and boxes:
             boxes.pop()
             selected_index = len(boxes) - 1 if boxes else None
@@ -353,6 +475,7 @@ class ClassSettingsDialog(QtWidgets.QDialog):
     def __init__(self, classes: List[str], colors: List[Tuple[int, int, int]], parent=None):
         super().__init__(parent)
         self.setWindowTitle("Class Settings")
+        self.setWindowFlag(QtCore.Qt.WindowContextHelpButtonHint, False)
         self.resize(400, 500)
         self._base_classes = list(classes)
         self._base_colors = list(colors) if colors else list(DEFAULT_CLASS_COLORS)
@@ -479,17 +602,35 @@ class CameraWindow(QtWidgets.QWidget):
         self.requested_height = height
         self.cap = open_camera(camera_index, width, height)
         self.current_frame = None  # Most recent BGR frame from the camera
+        self.inspect_mode = False
+        self.inspect_files: List[Path] = []
+        self.inspect_index = 0
 
         # Top navigation bar with menu + camera selector.
         self.menu_bar = QtWidgets.QMenuBar()
+        self.menu_bar.setStyleSheet(
+            "QMenuBar { background: transparent; }"
+            "QMenuBar::item { background: transparent; }"
+            "QMenu { background: #f0f0f0; color: black; }"
+            "QMenu::item:selected { background: #d0d0d0; }"
+        )
         file_menu = self.menu_bar.addMenu("File")
         quit_action = file_menu.addAction("Quit")
         quit_action.triggered.connect(QtWidgets.qApp.quit)
+        inspect_file_action = file_menu.addAction("Inspect File...")
+        inspect_file_action.triggered.connect(self.inspect_file)
+        inspect_folder_action = file_menu.addAction("Inspect Folder...")
+        inspect_folder_action.triggered.connect(self.inspect_folder)
         settings_menu = self.menu_bar.addMenu("Settings")
         edit_classes_action = settings_menu.addAction("Edit Classes && Colors")
         edit_classes_action.triggered.connect(self.open_class_settings)
         edit_camera_action = settings_menu.addAction("Edit Camera Settings")
         edit_camera_action.triggered.connect(self.open_camera_settings)
+        help_menu = self.menu_bar.addMenu("Help")
+        about_action = help_menu.addAction("About")
+        about_action.triggered.connect(self.show_about)
+        keys_action = help_menu.addAction("Key Bindings")
+        keys_action.triggered.connect(self.show_key_bindings)
 
         self.camera_selector = QtWidgets.QComboBox()
         self.camera_selector.setSizeAdjustPolicy(QtWidgets.QComboBox.AdjustToContents)
@@ -497,6 +638,8 @@ class CameraWindow(QtWidgets.QWidget):
         self.camera_selector.currentIndexChanged.connect(self.change_camera)
 
         nav_bar = QtWidgets.QWidget()
+        nav_bar.setAutoFillBackground(False)
+        nav_bar.setStyleSheet("background: transparent;")
         nav_layout = QtWidgets.QHBoxLayout(nav_bar)
         nav_layout.setContentsMargins(0, 0, 0, 0)
         nav_layout.setSpacing(10)
@@ -514,10 +657,27 @@ class CameraWindow(QtWidgets.QWidget):
         self.capture_button.clicked.connect(self.capture_frame)
         self.status_label = QtWidgets.QLabel("Ready")
 
+        # Inspect action buttons.
+        self.inspect_buttons = QtWidgets.QWidget()
+        btn_layout = QtWidgets.QHBoxLayout(self.inspect_buttons)
+        btn_layout.setContentsMargins(0, 0, 0, 0)
+        btn_layout.setSpacing(8)
+        self.inspect_delete_btn = QtWidgets.QPushButton("Delete (Del)")
+        self.inspect_delete_btn.clicked.connect(self._delete_current_inspect)
+        self.inspect_edit_btn = QtWidgets.QPushButton("Edit (E)")
+        self.inspect_edit_btn.clicked.connect(self._edit_current_inspect)
+        self.inspect_delete_btn.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Preferred)
+        self.inspect_edit_btn.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Preferred)
+        btn_layout.addWidget(self.inspect_delete_btn, 1)
+        btn_layout.addWidget(self.inspect_edit_btn, 1)
+        self.inspect_buttons.setEnabled(False)
+
         layout = QtWidgets.QVBoxLayout()
+        layout.setContentsMargins(0, 0, 0, 0)
         layout.addWidget(nav_bar)
         layout.addWidget(self.video_label)
         layout.addWidget(self.capture_button)
+        layout.addWidget(self.inspect_buttons)
         layout.addWidget(self.status_label)
         self.setLayout(layout)
         self.setWindowTitle(WINDOW_TITLE)
@@ -615,8 +775,206 @@ class CameraWindow(QtWidgets.QWidget):
             dialog.apply_settings()
             self.status_label.setText("Updated camera settings.")
 
+    def show_about(self) -> None:
+        """Display build information."""
+        QtWidgets.QMessageBox.information(
+            self,
+            "About",
+            f"{WINDOW_TITLE}\nBuild date: {BUILD_DATE}\nPyQt5 + OpenCV",
+        )
+
+    def show_key_bindings(self) -> None:
+        """Display a list of key bindings."""
+        bindings = [
+            "MAIN WINDOW:",
+            "  C - Capture frame",
+            "  Q - Quit",
+            "  LEFT/RIGHT (inspect mode) - Previous/next inspected file",
+            "  DELETE (inspect mode) - Delete current file + label",
+            "  E (inspect mode) - Edit current file in labeler",
+            "  ESC (inspect mode) - Exit inspection and resume camera",
+            "",
+            "LABELER WINDOW:",
+            "  Drag (LMB) - Draw box",
+            "  0-9 - Choose class",
+            "  Enter - Apply chosen class to selected box",
+            "  Left/Right - Select box",
+            "  Up/Down - Cycle class for selected box",
+            "  U / Z - Undo last box",
+            "  S - Save labels",
+            "  N - Mark null (no boxes only)",
+            "  Q / ESC - Cancel labeling",
+            "  Scroll - Zoom",
+            "  Middle drag - Pan",
+        ]
+        QtWidgets.QMessageBox.information(self, "Key Bindings", "\n".join(bindings))
+
+    def inspect_file(self) -> None:
+        """Inspect a single image file with its labels."""
+        path_str, _ = QtWidgets.QFileDialog.getOpenFileName(
+            self,
+            "Select Image",
+            str(Path.cwd()),
+            "Images (*.jpg *.jpeg *.png *.bmp);;All Files (*)",
+        )
+        if not path_str:
+            return
+        path = Path(path_str)
+        self.enter_inspect_mode([path], 0)
+
+    def inspect_folder(self) -> None:
+        """Inspect a folder of images; navigate with arrow keys."""
+        dir_str = QtWidgets.QFileDialog.getExistingDirectory(self, "Select Folder", str(Path.cwd()))
+        if not dir_str:
+            return
+        folder = Path(dir_str)
+        exts = {".jpg", ".jpeg", ".png", ".bmp"}
+        files = sorted([p for p in folder.iterdir() if p.suffix.lower() in exts and p.is_file()])
+        if not files:
+            QtWidgets.QMessageBox.information(self, "Inspect Folder", "No images found in this folder.")
+            return
+        self.enter_inspect_mode(files, 0)
+
+    def enter_inspect_mode(self, files: List[Path], start_index: int) -> None:
+        """Start inspection mode with provided file list."""
+        if not files:
+            return
+        self.inspect_files = files
+        self.inspect_index = max(0, min(start_index, len(files) - 1))
+        self.inspect_mode = True
+        self.timer.stop()
+        self.capture_button.setEnabled(False)
+        self.inspect_buttons.setEnabled(True)
+        self._display_inspect_image()
+
+    def exit_inspect_mode(self) -> None:
+        """Exit inspection mode and resume live camera."""
+        if not self.inspect_mode:
+            return
+        self.inspect_mode = False
+        self.inspect_files = []
+        self.inspect_index = 0
+        self.capture_button.setEnabled(True)
+        self.inspect_buttons.setEnabled(False)
+        self.status_label.setText("Inspect mode exited. Resuming camera.")
+        self.timer.start(TIMER_INTERVAL_MS)
+
+    def _display_inspect_image(self) -> None:
+        """Load and display the current inspect image with its labels."""
+        if not self.inspect_files:
+            return
+        image_path = self.inspect_files[self.inspect_index]
+        image = cv2.imread(str(image_path))
+        if image is None:
+            self.status_label.setText(f"Could not open {image_path.name}")
+            return
+
+        label_path = image_path.with_suffix(".txt")
+        boxes: List[List[int]] = load_labels_yolo(label_path, image)
+
+        # Draw boxes
+        for x1, y1, x2, y2, cls in boxes:
+            color = class_color(cls, self.class_colors)
+            cv2.rectangle(image, (x1, y1), (x2, y2), color, 2)
+            label = self.classes[cls] if 0 <= cls < len(self.classes) else str(cls)
+            draw_text_with_bg(image, f"{cls}: {label}", (x1, max(15, y1 - 5)), font_scale=0.5, color=(0, 255, 0), thickness=1)
+
+        # Overlay inspect mode key bindings.
+        overlay_lines = [
+            "INSPECT MODE:",
+            "LEFT/RIGHT: NAV | DELETE: DELETE FILE | E: EDIT | ESC: EXIT",
+        ]
+        y_pos = 24
+        for line in overlay_lines:
+            draw_text_with_bg(
+                image,
+                line,
+                (10, y_pos),
+                font_scale=0.6,
+                color=(0, 255, 0),
+                thickness=1,
+            )
+            y_pos += 24
+
+        frame_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+        h, w, ch = frame_rgb.shape
+        bytes_per_line = ch * w
+        q_image = QtGui.QImage(frame_rgb.data, w, h, bytes_per_line, QtGui.QImage.Format_RGB888)
+        pixmap = QtGui.QPixmap.fromImage(q_image)
+        self.video_label.setPixmap(pixmap)
+        self.video_label.setFixedSize(pixmap.size())
+
+        self.status_label.setText(
+            f"Inspecting {self.inspect_index + 1}/{len(self.inspect_files)}: {image_path.name} (boxes: {len(boxes)})"
+        )
+
+    def _delete_current_inspect(self) -> None:
+        """Delete current inspected image and its label; advance or exit."""
+        if not self.inspect_files:
+            return
+        image_path = self.inspect_files[self.inspect_index]
+        label_path = image_path.with_suffix(".txt")
+        try:
+            image_path.unlink(missing_ok=True)
+            label_path.unlink(missing_ok=True)
+        except OSError as exc:
+            self.status_label.setText(f"Failed to delete: {exc}")
+            return
+
+        del self.inspect_files[self.inspect_index]
+        if not self.inspect_files:
+            self.status_label.setText("Deleted file. No more items; exiting inspect mode.")
+            self.exit_inspect_mode()
+            return
+        if self.inspect_index >= len(self.inspect_files):
+            self.inspect_index = len(self.inspect_files) - 1
+        self._display_inspect_image()
+
+    def _edit_current_inspect(self) -> None:
+        """Open current inspected image in the labeler UI."""
+        if not self.inspect_files:
+            return
+        image_path = self.inspect_files[self.inspect_index]
+        image = cv2.imread(str(image_path))
+        if image is None:
+            self.status_label.setText(f"Could not open {image_path.name}")
+            return
+        initial_boxes = load_labels_yolo(image_path.with_suffix(".txt"), image)
+
+        # Temporarily pause timer and edit.
+        self.timer.stop()
+        result = annotate_image(image_path, self.classes, self.class_colors, initial_boxes=initial_boxes)
+
+        if result == "saved":
+            self.status_label.setText(f"Re-labeled {image_path.name}.")
+        elif result == "null":
+            NULL_DIR.mkdir(parents=True, exist_ok=True)
+            dest = NULL_DIR / image_path.name
+            try:
+                image_path.replace(dest)
+                image_path.with_suffix(".txt").unlink(missing_ok=True)
+                # Remove from inspect list and refresh.
+                del self.inspect_files[self.inspect_index]
+                if not self.inspect_files:
+                    self.status_label.setText("Marked null and exiting inspect mode.")
+                    self.exit_inspect_mode()
+                    return
+                if self.inspect_index >= len(self.inspect_files):
+                    self.inspect_index = len(self.inspect_files) - 1
+                self.status_label.setText(f"Marked null -> {dest}")
+            except OSError as exc:
+                self.status_label.setText(f"Failed to move to null: {exc}")
+        else:
+            self.status_label.setText("Edit cancelled.")
+
+        if self.inspect_mode:
+            self._display_inspect_image()
+            self.timer.stop()
+
     def update_frame(self) -> None:
         """Grab a frame from OpenCV, convert it, and display it in the QLabel."""
+        if self.inspect_mode:
+            return
         if not self.cap.isOpened():
             return
 
@@ -658,11 +1016,25 @@ class CameraWindow(QtWidgets.QWidget):
             self.capture_frame()
         elif event.key() in (QtCore.Qt.Key_Q,):
             self.close()
+        elif self.inspect_mode and event.key() in (QtCore.Qt.Key_Left, QtCore.Qt.Key_Right):
+            if self.inspect_files:
+                delta = -1 if event.key() == QtCore.Qt.Key_Left else 1
+                self.inspect_index = (self.inspect_index + delta) % len(self.inspect_files)
+                self._display_inspect_image()
+        elif self.inspect_mode and event.key() in (QtCore.Qt.Key_Delete,):
+            self._delete_current_inspect()
+        elif self.inspect_mode and event.key() in (QtCore.Qt.Key_E,):
+            self._edit_current_inspect()
+        elif self.inspect_mode and event.key() in (QtCore.Qt.Key_Escape,):
+            self.exit_inspect_mode()
         else:
             super().keyPressEvent(event)
 
     def capture_frame(self) -> None:
         """Save the most recent frame to disk, then force labeling before continuing."""
+        if self.inspect_mode:
+            self.status_label.setText("Exit inspect mode before capturing.")
+            return
         if self.current_frame is None:
             self.status_label.setText("No frame available yet.")
             return
@@ -684,9 +1056,22 @@ class CameraWindow(QtWidgets.QWidget):
 
         self.status_label.setText(f"Saved {image_path.name}. Please label it.")
 
-        labeled = annotate_image(image_path, self.classes, self.class_colors)
-        if labeled:
+        result = annotate_image(image_path, self.classes, self.class_colors)
+        if result == "saved":
             self.status_label.setText(f"Labeled {image_path.name}.")
+        elif result == "null":
+            NULL_DIR.mkdir(parents=True, exist_ok=True)
+            dest = NULL_DIR / image_path.name
+            try:
+                image_path.replace(dest)
+                image_path.with_suffix(".txt").unlink(missing_ok=True)
+                try:
+                    rel = dest.relative_to(Path.cwd())
+                except ValueError:
+                    rel = dest
+                self.status_label.setText(f"Marked null -> {rel}")
+            except OSError as exc:
+                self.status_label.setText(f"Failed to move to null: {exc}")
         else:
             # If labeling was cancelled, remove the capture so nothing remains unlabeled.
             try:
@@ -707,6 +1092,7 @@ class CameraSettingsDialog(QtWidgets.QDialog):
     def __init__(self, cap: cv2.VideoCapture, parent=None):
         super().__init__(parent)
         self.setWindowTitle("Camera Settings")
+        self.setWindowFlag(QtCore.Qt.WindowContextHelpButtonHint, False)
         self.cap = cap
         self._prop_ids = {
             "exposure": cv2.CAP_PROP_EXPOSURE,
@@ -726,8 +1112,8 @@ class CameraSettingsDialog(QtWidgets.QDialog):
             self.exposure_spin,
             self._prop_ids["exposure"],
             default=0.0,
-            probe_set=True,
-            restore_after_probe=True,
+            probe_set=False,
+            restore_after_probe=False,
         )
         form.addRow("Exposure", self.exposure_spin)
 
@@ -831,11 +1217,20 @@ class CameraSettingsDialog(QtWidgets.QDialog):
         if probe_set:
             original_value = value
             ok = self.cap.set(prop_id, value)
-            if restore_after_probe and ok and original_value is not None:
-                # Restore original value in case the driver reset it (e.g., to -6).
-                self.cap.set(prop_id, original_value)
             if not ok:
                 return False, None
+            if restore_after_probe and original_value is not None:
+                # Restore original value in case the driver reset it (e.g., to -6).
+                self.cap.set(prop_id, original_value)
+                restored = self.cap.get(prop_id)
+                if restored is None or (isinstance(restored, float) and math.isnan(restored)):
+                    return False, None
+                if not math.isclose(restored, original_value, rel_tol=1e-3, abs_tol=1e-3):
+                    # Try one more restore; if it fails, mark unsupported to avoid side effects.
+                    self.cap.set(prop_id, original_value)
+                    restored = self.cap.get(prop_id)
+                    if not math.isclose(restored, original_value, rel_tol=1e-3, abs_tol=1e-3):
+                        return False, None
         return True, value
 
     @staticmethod
