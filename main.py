@@ -281,6 +281,17 @@ def open_camera(index: int, width: Optional[int], height: Optional[int]) -> cv2.
     return cap
 
 
+def enumerate_cameras(max_index: int = 5) -> List[int]:
+    """Probe a handful of indices to find available cameras."""
+    found = []
+    for idx in range(max_index):
+        cap = cv2.VideoCapture(idx)
+        if cap.isOpened():
+            found.append(idx)
+        cap.release()
+    return found
+
+
 class CameraWindow(QtWidgets.QWidget):
     """Simple window that shows live frames from a camera using Qt widgets."""
 
@@ -289,8 +300,30 @@ class CameraWindow(QtWidgets.QWidget):
 
         self.classes = load_classes()
         self.camera_index = camera_index
+        self.requested_width = width
+        self.requested_height = height
         self.cap = open_camera(camera_index, width, height)
         self.current_frame = None  # Most recent BGR frame from the camera
+
+        # Top navigation bar with menu + camera selector.
+        self.menu_bar = QtWidgets.QMenuBar()
+        file_menu = self.menu_bar.addMenu("File")
+        quit_action = file_menu.addAction("Quit")
+        quit_action.triggered.connect(QtWidgets.qApp.quit)
+
+        self.camera_selector = QtWidgets.QComboBox()
+        self.camera_selector.setSizeAdjustPolicy(QtWidgets.QComboBox.AdjustToContents)
+        self.populate_camera_selector()
+        self.camera_selector.currentIndexChanged.connect(self.change_camera)
+
+        nav_bar = QtWidgets.QWidget()
+        nav_layout = QtWidgets.QHBoxLayout(nav_bar)
+        nav_layout.setContentsMargins(0, 0, 0, 0)
+        nav_layout.setSpacing(10)
+        nav_layout.addWidget(self.menu_bar)
+        nav_layout.addStretch()
+        nav_layout.addWidget(QtWidgets.QLabel("Camera:"))
+        nav_layout.addWidget(self.camera_selector)
 
         # Basic UI: video preview, capture button, status text.
         self.video_label = QtWidgets.QLabel(alignment=QtCore.Qt.AlignCenter)
@@ -302,6 +335,7 @@ class CameraWindow(QtWidgets.QWidget):
         self.status_label = QtWidgets.QLabel("Ready")
 
         layout = QtWidgets.QVBoxLayout()
+        layout.addWidget(nav_bar)
         layout.addWidget(self.video_label)
         layout.addWidget(self.capture_button)
         layout.addWidget(self.status_label)
@@ -316,6 +350,47 @@ class CameraWindow(QtWidgets.QWidget):
 
         if not self.cap.isOpened():
             self.video_label.setText(f"Unable to open camera index {camera_index}.")
+
+    def populate_camera_selector(self) -> None:
+        """Fill the dropdown with discovered camera indices, keeping the current one if missing."""
+        available = enumerate_cameras()
+        if not available:
+            available = [self.camera_index]
+
+        self.camera_selector.blockSignals(True)
+        self.camera_selector.clear()
+        for idx in available:
+            self.camera_selector.addItem(f"Camera {idx}", idx)
+
+        if self.camera_selector.findData(self.camera_index) == -1:
+            self.camera_selector.addItem(f"Camera {self.camera_index}", self.camera_index)
+
+        current_idx = self.camera_selector.findData(self.camera_index)
+        if current_idx >= 0:
+            self.camera_selector.setCurrentIndex(current_idx)
+        self.camera_selector.blockSignals(False)
+
+    def change_camera(self, combo_index: int) -> None:
+        """Switch to the camera selected in the dropdown."""
+        new_index = self.camera_selector.itemData(combo_index)
+        if new_index is None or new_index == self.camera_index:
+            return
+
+        self.timer.stop()
+        new_cap = open_camera(new_index, self.requested_width, self.requested_height)
+        if not new_cap.isOpened():
+            self.status_label.setText(f"Unable to open camera {new_index}.")
+            new_cap.release()
+            self.timer.start(TIMER_INTERVAL_MS)
+            self.populate_camera_selector()
+            return
+
+        if self.cap.isOpened():
+            self.cap.release()
+        self.cap = new_cap
+        self.camera_index = new_index
+        self.status_label.setText(f"Switched to camera {new_index}.")
+        self.timer.start(TIMER_INTERVAL_MS)
 
     def update_frame(self) -> None:
         """Grab a frame from OpenCV, convert it, and display it in the QLabel."""
