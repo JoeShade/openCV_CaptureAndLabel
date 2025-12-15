@@ -44,8 +44,8 @@ Each module is designed to be camera-agnostic and file-system-based to minimise 
 ### Create a virtual environment and install OpenCV (PowerShell)
 ```powershell
 # From the repository root
-py -3.12 -m venv .venv
-.\.venv\Scripts\activate
+py -3.12 -m venv .venv312
+.\.venv312\Scripts\activate
 
 # Upgrade pip and install wheel-only builds to avoid compiling
 pip install --upgrade pip
@@ -118,15 +118,13 @@ This format was selected for compatibility with common training frameworks and e
 The dataset is stored entirely on disk using a transparent directory structure:
 
 ```
-dataset/
-├── images/
-│   └── all/
-├── labels/
-│   └── all/
-├── meta/
-│   └── metadata.csv
-└── classes.txt
+captures/
+  capture_YYYYMMDD_HHMMSS_xxx.jpg
+  null/                 # null/removed captures
+classes.txt             # class names (one per line)
+class_colors.json       # optional RGB palette
 ```
+
 
 ### Design Rationale
 - Images are not stored in a database to avoid unnecessary I/O overhead
@@ -184,3 +182,59 @@ This tool is intended for:
 - Controlled data collection in laboratory or bench-top environments
 
 It is not intended for production inspection systems or safety-critical use.
+
+---
+
+## Useful Commands
+
+### Run (dev)
+```powershell
+.\.venv312\Scripts\activate
+python main.py --camera 0
+```
+
+### Build (PyInstaller, windowless)
+```powershell
+pyinstaller --name OpenCVCapture --noconfirm --onedir -w main.py `
+  --icon "programLogo.ico" `
+  --hidden-import sip `
+  --add-data "classes.txt;." `
+  --add-data "class_colors.json;." `
+  --add-data "captures;captures" `
+  --add-data "logo.bmp;." `
+  --add-data "programLogo.ico;." `
+  --add-data "$Env:VIRTUAL_ENV\Lib\site-packages\PyQt5\Qt5\plugins;PyQt5\Qt5\plugins"
+```
+Output lives in `dist/OpenCVCapture/`. Run from there: `.\OpenCVCapture.exe --camera 0`.
+
+### Clean build artifacts
+```powershell
+Remove-Item -Recurse -Force build, dist, OpenCVCapture.spec
+```
+
+### Key bindings
+
+**Main window**
+```
+C             Capture frame
+Q             Quit
+LEFT/RIGHT    Prev/next (inspect mode)
+DELETE        Delete current file (inspect mode)
+E             Edit current file (inspect mode)
+ESC           Exit inspect mode
+```
+
+**Labeler window**
+```
+Drag (LMB)    Draw box
+0-9           Choose class
+Enter         Apply class to selected box
+Left/Right    Select box
+Up/Down       Cycle class for selected box
+U / Z         Undo last box
+S             Save labels
+N             Mark null
+Q / ESC       Cancel labeling
+Scroll        Zoom
+Middle drag   Pan
+```

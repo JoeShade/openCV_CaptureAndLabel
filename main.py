@@ -1,8 +1,11 @@
-"""Camera capture and bounding-box labeling tool (PyQt + OpenCV).
+"""OpenCV Capture and Label (PyQt).
 
-- Live camera preview in a desktop window.
-- Capture a frame (button or `c`) and immediately label it with boxes.
-- YOLO-format labels are saved alongside each captured image.
+This desktop tool provides:
+- Live camera preview with capture + mandatory labeling flow.
+- Keyboard-driven annotator (boxes, class selection, pan/zoom) with null/discard paths.
+- Camera inspection tools (class/color editor, camera settings dialog).
+- Dataset inspection mode to browse/edit/delete labeled images.
+- Portable packaging via PyInstaller (splash, icons included).
 """
 
 import argparse
@@ -17,7 +20,7 @@ import cv2
 from PyQt5 import QtCore, QtGui, QtWidgets
 
 
-# Constants
+# Constants and configuration
 WINDOW_TITLE = "OpenCV Capture and Label"
 CAPTURE_DIR = Path("captures")
 NULL_DIR = CAPTURE_DIR / "null"
@@ -250,6 +253,9 @@ def logo_pixmap(color: QtGui.QColor = QtGui.QColor("#00ff7f")) -> QtGui.QPixmap:
 
 def load_logo_file_pixmap() -> Optional[QtGui.QPixmap]:
     """Load logo.bmp if available (supports PyInstaller frozen paths) and strip white background."""
+    # Cache to avoid reprocessing per splash creation.
+    if getattr(load_logo_file_pixmap, "_cache", None) is not None:
+        return load_logo_file_pixmap._cache  # type: ignore[attr-defined]
     try:
         base = Path(sys._MEIPASS) if getattr(sys, "frozen", False) else Path.cwd()
     except Exception:
@@ -258,13 +264,17 @@ def load_logo_file_pixmap() -> Optional[QtGui.QPixmap]:
     if logo_path.exists():
         pix = QtGui.QPixmap(str(logo_path))
         if not pix.isNull():
+            # Convert pure white to transparent so the logo sits cleanly on the splash.
             img = pix.toImage().convertToFormat(QtGui.QImage.Format_ARGB32)
             white = QtGui.QColor(255, 255, 255)
             for y in range(img.height()):
                 for x in range(img.width()):
                     if img.pixelColor(x, y) == white:
                         img.setPixelColor(x, y, QtGui.QColor(255, 255, 255, 0))
-            return QtGui.QPixmap.fromImage(img)
+            processed = QtGui.QPixmap.fromImage(img)
+            load_logo_file_pixmap._cache = processed  # type: ignore[attr-defined]
+            return processed
+    load_logo_file_pixmap._cache = None  # type: ignore[attr-defined]
     return None
 
 
@@ -310,7 +320,7 @@ def annotate_image(
     image = cv2.imread(str(image_path))
     if image is None:
         print(f"Could not load image for annotation: {image_path}")
-        return False
+        return "cancel"
 
     window_name = f"Annotate: {image_path.name}"
     boxes: List[List[Optional[int]]] = []  # [x1, y1, x2, y2, class_id or None]
@@ -917,34 +927,38 @@ class CameraWindow(QtWidgets.QWidget):
         QtWidgets.QMessageBox.information(
             self,
             "About",
-            f"{WINDOW_TITLE}\nBuild date: {BUILD_DATE}\nPyQt5 + OpenCV",
+            f"{WINDOW_TITLE}\nBuild date: {BUILD_DATE}"
         )
 
     def show_key_bindings(self) -> None:
         """Display a list of key bindings."""
-        bindings = [
-            "MAIN WINDOW:",
-            "  C - Capture frame",
-            "  Q - Quit",
-            "  LEFT/RIGHT (inspect mode) - Previous/next inspected file",
-            "  DELETE (inspect mode) - Delete current file + label",
-            "  E (inspect mode) - Edit current file in labeler",
-            "  ESC (inspect mode) - Exit inspection and resume camera",
-            "",
-            "LABELER WINDOW:",
-            "  Drag (LMB) - Draw box",
-            "  0-9 - Choose class",
-            "  Enter - Apply chosen class to selected box",
-            "  Left/Right - Select box",
-            "  Up/Down - Cycle class for selected box",
-            "  U / Z - Undo last box",
-            "  S - Save labels",
-            "  N - Mark null (no boxes only)",
-            "  Q / ESC - Cancel labeling",
-            "  Scroll - Zoom",
-            "  Middle drag - Pan",
-        ]
-        QtWidgets.QMessageBox.information(self, "Key Bindings", "\n".join(bindings))
+        # Use simple HTML with a monospaced <pre> block for aligned columns.
+        html = """
+<b>Main Window</b>
+<pre>
+C             Capture frame
+Q             Quit
+LEFT/RIGHT    Prev/next (inspect mode)
+DELETE        Delete current file (inspect mode)
+E             Edit current file (inspect mode)
+ESC           Exit inspect mode
+</pre>
+<b>Labeler Window</b>
+<pre>
+Drag (LMB)    Draw box
+0-9           Choose class
+Enter         Apply class to selected box
+Left/Right    Select box
+Up/Down       Cycle class for selected box
+U / Z         Undo last box
+S             Save labels
+N             Mark null
+Q / ESC       Cancel labeling
+Scroll        Zoom
+Middle drag   Pan
+</pre>
+"""
+        QtWidgets.QMessageBox.information(self, "Key Bindings", html)
 
     def inspect_file(self) -> None:
         """Inspect a single image file with its labels."""
@@ -1113,7 +1127,7 @@ class CameraWindow(QtWidgets.QWidget):
         self._apply_display_pixmap()
 
     def _apply_display_pixmap(self) -> None:
-        """Apply the stored pixmap to the label with aspect fit."""
+        """Apply the stored pixmap to the label with aspect fit so it stays centered on resize."""
         if self._last_pixmap is None:
             return
         target_size = self.video_label.size()
@@ -1364,8 +1378,8 @@ class CameraSettingsDialog(QtWidgets.QDialog):
         value = self.cap.get(prop_id)
         if value is None or (isinstance(value, float) and math.isnan(value)):
             return False, None
-        # Heuristic: if zero means unsupported for this property, disable it.
-        if zero_means_unsupported and value == 0:
+        # If probing is disabled, treat zero-as-unsupported heuristically.
+        if not probe_set and zero_means_unsupported and value == 0:
             return False, None
         # Probe with a no-op set; some drivers report values but reject writes.
         if probe_set:
