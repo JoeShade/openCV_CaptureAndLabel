@@ -195,6 +195,7 @@ python main.py --camera 0
 
 ### Build (PyInstaller, windowless)
 ```powershell
+.\.venv312\Scripts\activate
 pyinstaller --name OpenCVCapture --noconfirm --onedir -w main.py `
   --icon "programLogo.ico" `
   --hidden-import sip `

@@ -433,30 +433,7 @@ def annotate_image(
             safe_destroy_window(window_name)
             return "cancel"
 
-        # Draw boxes and the in-progress rectangle over a copy of the image.
-        canvas = image.copy()
-        for idx, (x1, y1, x2, y2, cls) in enumerate(boxes):
-            # Preview pending class on the selected box before applying.
-            display_cls: Optional[int] = pending_class_choice if (idx == selected_index and pending_class_choice is not None) else cls
-            base_color = class_color(display_cls, class_colors) if display_cls is not None else (0, 165, 255)
-            color = (255, 255, 255) if (idx == selected_index and flash_on) else base_color
-            cv2.rectangle(canvas, (x1, y1), (x2, y2), color, 2)
-            if display_cls is not None:
-                label = (classes[display_cls] if display_cls < len(classes) else str(display_cls)).upper()
-                suffix = " (PENDING)" if (idx == selected_index and pending_class_choice is not None and cls is None) else ""
-                draw_text_with_bg(
-                    canvas,
-                    f"{display_cls}: {label}{suffix}",
-                    (x1, max(15, y1 - 5)),
-                    font_scale=0.5,
-                    color=(0, 255, 0),
-                    thickness=1,
-                )
-
-        if drawing and start_point and current_point:
-            cv2.rectangle(canvas, start_point, current_point, (0, 165, 255), 1)
-
-        # Apply zoom/pan to produce the displayed view.
+        # Apply zoom/pan on the base image only; draw overlays after scaling so text/boxes stay crisp.
         roi_w = int(round(img_width / zoom_factor))
         roi_h = int(round(img_height / zoom_factor))
         roi_w = max(1, min(img_width, roi_w))
@@ -469,8 +446,40 @@ def annotate_image(
         cx = max(half_w, min(img_width - half_w, cx))
         cy = max(half_h, min(img_height - half_h, cy))
         current_view_params = (float(roi_w), float(roi_h), cx, cy)
-        roi = cv2.getRectSubPix(canvas, (roi_w, roi_h), (cx, cy))
+        roi = cv2.getRectSubPix(image, (roi_w, roi_h), (cx, cy))
         view = cv2.resize(roi, (img_width, img_height), interpolation=cv2.INTER_LINEAR)
+
+        def img_to_view(ix: int, iy: int) -> Tuple[int, int]:
+            vx = int(round((ix - (cx - roi_w / 2.0)) * (img_width / roi_w)))
+            vy = int(round((iy - (cy - roi_h / 2.0)) * (img_height / roi_h)))
+            vx = max(0, min(img_width - 1, vx))
+            vy = max(0, min(img_height - 1, vy))
+            return vx, vy
+
+        # Draw boxes and the in-progress rectangle after scaling.
+        for idx, (x1, y1, x2, y2, cls) in enumerate(boxes):
+            display_cls: Optional[int] = pending_class_choice if (idx == selected_index and pending_class_choice is not None) else cls
+            base_color = class_color(display_cls, class_colors) if display_cls is not None else (0, 165, 255)
+            color = (255, 255, 255) if (idx == selected_index and flash_on) else base_color
+            v1 = img_to_view(x1, y1)
+            v2 = img_to_view(x2, y2)
+            cv2.rectangle(view, v1, v2, color, 2)
+            if display_cls is not None:
+                label = (classes[display_cls] if display_cls < len(classes) else str(display_cls)).upper()
+                suffix = " (PENDING)" if (idx == selected_index and pending_class_choice is not None and cls is None) else ""
+                draw_text_with_bg(
+                    view,
+                    f"{display_cls}: {label}{suffix}",
+                    (v1[0], max(15, v1[1] - 5)),
+                    font_scale=0.5,
+                    color=(0, 255, 0),
+                    thickness=1,
+                )
+
+        if drawing and start_point and current_point:
+            v_start = img_to_view(*start_point)
+            v_cur = img_to_view(*current_point)
+            cv2.rectangle(view, v_start, v_cur, (0, 165, 255), 1)
 
         # On-screen instructions for quick reference (drawn after zoom so they stay static).
         top_line = "Drag: draw box | 0-9: pick class | enter: apply to selected"
@@ -776,6 +785,10 @@ class CameraWindow(QtWidgets.QWidget):
         self.camera_selector.setSizeAdjustPolicy(QtWidgets.QComboBox.AdjustToContents)
         self.camera_selector.setMinimumWidth(120)
         self.camera_selector.setFixedHeight(self.menu_bar.sizeHint().height())
+        self.camera_selector.setStyleSheet(
+            "QComboBox { background: #f0f0f0; color: black; }"
+            "QComboBox QAbstractItemView { background: #f0f0f0; color: black; }"
+        )
         self.populate_camera_selector()
         self.camera_selector.currentIndexChanged.connect(self.change_camera)
 
