@@ -133,6 +133,7 @@ captures/
   null/                 # null/removed captures
 classes.txt             # class names (one per line)
 class_colors.json       # optional RGB palette
+config.json             # optional app config (timers, labeler loop)
 ```
 
 

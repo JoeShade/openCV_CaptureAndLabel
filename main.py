@@ -47,7 +47,13 @@ DEFAULT_CLASS_COLORS = [
     (0, 255, 255),   # light blue
     (0, 255, 128),   # mint
 ]
-TIMER_INTERVAL_MS = 33  # ~30 FPS for the preview timer
+CONFIG_PATH = Path("config.json")
+DEFAULT_TIMER_INTERVAL_MS = 33  # ~30 FPS for the preview timer
+DEFAULT_ANNOTATE_WAIT_KEY_MS = 30
+DEFAULT_CONFIG = {
+    "timer_interval_ms": DEFAULT_TIMER_INTERVAL_MS,
+    "annotate_wait_key_ms": DEFAULT_ANNOTATE_WAIT_KEY_MS,
+}
 LOGO_WIDTH = 64
 LOGO_HEIGHT = 64
 LOGO_BITMAP = bytes(
@@ -121,13 +127,53 @@ LOGO_BITMAP = bytes(
 
 # Global variables (none)
 
+def load_config(path: Path = CONFIG_PATH) -> dict:
+    """Load JSON config overrides, falling back to defaults on error."""
+    config = dict(DEFAULT_CONFIG)
+    if not path.exists():
+        return config
+    try:
+        raw = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeError) as exc:
+        print(f"Failed to read config {path}: {exc}")
+        return config
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        print(f"Failed to parse config {path}: {exc}")
+        return config
+    if not isinstance(data, dict):
+        print(f"Config {path} must be a JSON object.")
+        return config
+
+    def _apply_int(key: str, min_value: int, max_value: int) -> None:
+        value = data.get(key)
+        if isinstance(value, bool):
+            return
+        if isinstance(value, (int, float)):
+            value = int(value)
+            if min_value <= value <= max_value:
+                config[key] = value
+
+    _apply_int("timer_interval_ms", 1, 1000)
+    _apply_int("annotate_wait_key_ms", 1, 1000)
+    return config
+
+
+CONFIG = load_config()
+
 
 def load_classes(path: Path = CLASSES_PATH) -> List[str]:
     """Read class names from classes.txt; fall back to a single 'defect' class."""
-    if path.exists():
+    if not path.exists():
+        return ["defect"]
+    try:
         names = [line.strip() for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
-        if names:
-            return names
+    except (OSError, UnicodeError) as exc:
+        print(f"Failed to read classes from {path}: {exc}")
+        return ["defect"]
+    if names:
+        return names
     return ["defect"]
 
 
@@ -403,6 +449,9 @@ def annotate_image(
     cv2.namedWindow(window_name)
     cv2.setMouseCallback(window_name, on_mouse)
 
+    qt_app = QtWidgets.QApplication.instance()
+    wait_key_ms = CONFIG.get("annotate_wait_key_ms", DEFAULT_ANNOTATE_WAIT_KEY_MS)
+
     while True:
         flash_counter += 1
         flash_on = (flash_counter // 15) % 2 == 0  # toggle roughly every 0.5s at ~30 fps
@@ -502,8 +551,10 @@ def annotate_image(
             )
 
         cv2.imshow(window_name, view)
+        if qt_app is not None:
+            qt_app.processEvents()
         # waitKeyEx preserves extended key codes (e.g., arrow keys).
-        key = cv2.waitKeyEx(30)
+        key = cv2.waitKeyEx(wait_key_ms)
 
         if key == ord("s"):
             if any(cls is None for *_, cls in boxes):
@@ -734,6 +785,7 @@ class CameraWindow(QtWidgets.QWidget):
         self.inspect_mode = False
         self.inspect_files: List[Path] = []
         self.inspect_index = 0
+        self.timer_interval_ms = CONFIG.get("timer_interval_ms", DEFAULT_TIMER_INTERVAL_MS)
 
         # Top navigation bar with menu + camera selector.
         self.menu_bar = QtWidgets.QMenuBar()
@@ -833,7 +885,7 @@ class CameraWindow(QtWidgets.QWidget):
         # from OpenCV without blocking the UI event loop.
         self.timer = QtCore.QTimer(self)
         self.timer.timeout.connect(self.update_frame)
-        self.timer.start(TIMER_INTERVAL_MS)
+        self.timer.start(self.timer_interval_ms)
 
         if not self.cap.isOpened():
             self.video_label.setText(f"Unable to open camera index {camera_index}.")
@@ -868,7 +920,7 @@ class CameraWindow(QtWidgets.QWidget):
         if not new_cap.isOpened():
             self.status_label.setText(f"Unable to open camera {new_index}.")
             new_cap.release()
-            self.timer.start(TIMER_INTERVAL_MS)
+            self.timer.start(self.timer_interval_ms)
             self.populate_camera_selector()
             return
 
@@ -877,7 +929,7 @@ class CameraWindow(QtWidgets.QWidget):
         self.cap = new_cap
         self.camera_index = new_index
         self.status_label.setText(f"Switched to camera {new_index}.")
-        self.timer.start(TIMER_INTERVAL_MS)
+        self.timer.start(self.timer_interval_ms)
 
     def _sync_palette_with_classes(self) -> None:
         """Ensure we have a color per class (pad or trim)."""
@@ -1001,7 +1053,7 @@ Middle drag   Pan
         self.capture_button.setEnabled(True)
         self.inspect_buttons.setEnabled(False)
         self.status_label.setText("Inspect mode exited. Resuming camera.")
-        self.timer.start(TIMER_INTERVAL_MS)
+        self.timer.start(self.timer_interval_ms)
 
     def _display_inspect_image(self) -> None:
         """Load and display the current inspect image with its labels."""
@@ -1214,7 +1266,7 @@ Middle drag   Pan
         if not success:
             self.status_label.setText("Failed to save image.")
             self.capture_button.setEnabled(True)
-            self.timer.start(TIMER_INTERVAL_MS)
+            self.timer.start(self.timer_interval_ms)
             return
 
         self.status_label.setText(f"Saved {image_path.name}. Please label it.")
@@ -1248,7 +1300,7 @@ Middle drag   Pan
 
         # Resume the live feed and allow the next capture.
         self.capture_button.setEnabled(True)
-        self.timer.start(TIMER_INTERVAL_MS)
+        self.timer.start(self.timer_interval_ms)
 
 
 class CameraSettingsDialog(QtWidgets.QDialog):
