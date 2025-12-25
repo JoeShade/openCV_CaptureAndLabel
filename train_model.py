@@ -18,7 +18,6 @@ try:
     BUILD_DATE = datetime.fromtimestamp(build_source.stat().st_mtime).strftime("%d/%m/%Y")
 except OSError:
     BUILD_DATE = datetime.now().strftime("%d/%m/%Y")
-LOGO_FILE = Path("logo.bmp")
 ICON_FILE = Path("trainIcon.ico")
 
 
@@ -33,33 +32,6 @@ def logo_pixmap(color: QtGui.QColor = QtGui.QColor("#00ff7f")) -> QtGui.QPixmap:
     painter.drawPixmap(0, 0, QtGui.QPixmap.fromImage(logo_bitmap.toImage()))
     painter.end()
     return pixmap
-
-
-def load_logo_file_pixmap() -> Optional[QtGui.QPixmap]:
-    """Load logo.bmp if available (supports PyInstaller frozen paths) and strip white background."""
-    if getattr(load_logo_file_pixmap, "_cache", None) is not None:
-        return load_logo_file_pixmap._cache  # type: ignore[attr-defined]
-
-    if getattr(sys, "frozen", False):
-        base = Path(sys.executable).resolve().parent
-    else:
-        base = Path(__file__).resolve().parent
-
-    logo_path = base / LOGO_FILE.name
-    if logo_path.exists():
-        pix = QtGui.QPixmap(str(logo_path))
-        if not pix.isNull():
-            image = pix.toImage().convertToFormat(QtGui.QImage.Format_ARGB32)
-            for y in range(image.height()):
-                for x in range(image.width()):
-                    if QtGui.QColor(image.pixel(x, y)).rgb() == QtGui.QColor(255, 255, 255).rgb():
-                        image.setPixelColor(x, y, QtGui.QColor(255, 255, 255, 0))
-            processed = QtGui.QPixmap.fromImage(image)
-            load_logo_file_pixmap._cache = processed  # type: ignore[attr-defined]
-            return processed
-
-    load_logo_file_pixmap._cache = None  # type: ignore[attr-defined]
-    return None
 
 
 def detect_gpus() -> List[str]:
@@ -81,6 +53,7 @@ def detect_gpus() -> List[str]:
 
 
 def human_eta(seconds: float) -> str:
+    """Convert seconds into a friendly ETA string."""
     if seconds <= 0:
         return "--:--"
     minutes, sec = divmod(int(seconds), 60)
@@ -91,6 +64,7 @@ def human_eta(seconds: float) -> str:
 
 
 def read_classes(path: Path) -> List[str]:
+    """Read class names from a plain text file (one class per line)."""
     if not path.exists():
         return []
     return [line.strip() for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
@@ -103,6 +77,7 @@ class TrainingWindow(QtWidgets.QMainWindow):
         if ICON_FILE.exists():
             self.setWindowIcon(QtGui.QIcon(str(ICON_FILE)))
 
+        # Basic menu actions for quit/help.
         self.menu_bar = self.menuBar()
         file_menu = self.menu_bar.addMenu("File")
         quit_action = file_menu.addAction("Quit")
@@ -116,6 +91,7 @@ class TrainingWindow(QtWidgets.QMainWindow):
         self.quit_shortcut = QtWidgets.QShortcut(QtGui.QKeySequence("Ctrl+Q"), self)
         self.quit_shortcut.activated.connect(QtWidgets.qApp.quit)
 
+        # QProcess is used so we can stream training output live into the UI.
         self.process = QtCore.QProcess(self)
         self.process.readyReadStandardOutput.connect(self.handle_stdout)
         self.process.readyReadStandardError.connect(self.handle_stderr)
@@ -124,6 +100,7 @@ class TrainingWindow(QtWidgets.QMainWindow):
         self.process.started.connect(self.training_started)
         self.process.setProcessChannelMode(QtCore.QProcess.MergedChannels)
 
+        # Training metadata for ETA/progress estimation.
         self.start_time: Optional[float] = None
         self.total_epochs: Optional[int] = None
 
@@ -149,6 +126,7 @@ class TrainingWindow(QtWidgets.QMainWindow):
         classes_row.addWidget(self.classes_button)
         form.addRow("Classes file:", classes_row)
 
+        # Offer common YOLOv8 model sizes for convenience.
         self.model_combo = QtWidgets.QComboBox()
         self.model_combo.addItems(
             [
@@ -161,11 +139,13 @@ class TrainingWindow(QtWidgets.QMainWindow):
         )
         form.addRow("Model version:", self.model_combo)
 
+        # Threads are passed to Ultralytics "workers" to speed up data loading.
         self.thread_spin = QtWidgets.QSpinBox()
         self.thread_spin.setRange(1, max(1, os.cpu_count() or 1))
         self.thread_spin.setValue(min(8, self.thread_spin.maximum()))
         form.addRow("Threads:", self.thread_spin)
 
+        # Allow the user to disable GPU usage quickly if CUDA is misconfigured.
         self.gpu_enable = QtWidgets.QCheckBox("Enable GPU acceleration")
         self.gpu_enable.setChecked(True)
         self.gpu_enable.toggled.connect(self.toggle_gpu)
@@ -180,6 +160,7 @@ class TrainingWindow(QtWidgets.QMainWindow):
         self.eta_label = QtWidgets.QLabel("ETA: --:--")
         layout.addWidget(self.eta_label)
 
+        # Progress bar is indeterminate until we parse epoch counts from logs.
         self.progress = QtWidgets.QProgressBar()
         self.progress.setRange(0, 1)
         self.progress.setValue(0)
@@ -223,11 +204,13 @@ Ctrl+Q        Quit
         msg.exec_()
 
     def browse_dataset(self) -> None:
+        """Select the dataset folder that contains images and labels."""
         directory = QtWidgets.QFileDialog.getExistingDirectory(self, "Select dataset folder")
         if directory:
             self.dataset_edit.setText(directory)
 
     def browse_classes(self) -> None:
+        """Select the classes.txt file that lists class names."""
         path, _ = QtWidgets.QFileDialog.getOpenFileName(
             self, "Select classes.txt", filter="Text Files (*.txt);;All Files (*)"
         )
@@ -235,6 +218,7 @@ Ctrl+Q        Quit
             self.classes_edit.setText(path)
 
     def refresh_gpus(self) -> None:
+        """Populate the GPU dropdown by calling nvidia-smi."""
         self.gpu_combo.clear()
         gpus = detect_gpus()
         if not gpus:
@@ -248,11 +232,18 @@ Ctrl+Q        Quit
         self.gpu_combo.setEnabled(enabled)
 
     def log(self, message: str) -> None:
+        """Append a timestamped line to the log view."""
         timestamp = time.strftime("%H:%M:%S")
         self.log_view.appendPlainText(f"[{timestamp}] {message}")
 
     def prepare_dataset(self, dataset_dir: Path, classes_path: Path) -> Optional[Path]:
-        images = sorted(dataset_dir.glob("*.jpeg")) + sorted(dataset_dir.glob("*.jpg"))
+        """Build a temporary YOLO folder structure with train/val splits."""
+        images = (
+            sorted(dataset_dir.glob("*.jpeg"))
+            + sorted(dataset_dir.glob("*.jpg"))
+            + sorted(dataset_dir.glob("*.png"))
+            + sorted(dataset_dir.glob("*.bmp"))
+        )
         labeled = [img for img in images if img.with_suffix(".txt").exists()]
         if not labeled:
             QtWidgets.QMessageBox.warning(self, "No data", "No labeled images were found in that folder.")
@@ -263,6 +254,7 @@ Ctrl+Q        Quit
             QtWidgets.QMessageBox.warning(self, "Missing classes", "The classes file is empty or missing.")
             return None
 
+        # Cache folder keeps training data separate from raw captures.
         cache_dir = dataset_dir / ".yolo_training_cache"
         if cache_dir.exists():
             shutil.rmtree(cache_dir)
@@ -271,6 +263,7 @@ Ctrl+Q        Quit
         (cache_dir / "labels" / "train").mkdir(parents=True, exist_ok=True)
         (cache_dir / "labels" / "val").mkdir(parents=True, exist_ok=True)
 
+        # Use a fixed seed so the train/val split stays reproducible.
         rng = random.Random(42)
         rng.shuffle(labeled)
         split_index = max(1, int(len(labeled) * 0.8))
@@ -278,6 +271,7 @@ Ctrl+Q        Quit
         val_items = labeled[split_index:] or labeled[:1]
 
         def link_or_copy(src: Path, dst: Path) -> None:
+            """Symlink if possible to save space; otherwise copy the file."""
             try:
                 dst.symlink_to(src)
             except OSError:
@@ -302,6 +296,7 @@ Ctrl+Q        Quit
         return data_yaml
 
     def start_training(self) -> None:
+        """Validate inputs, build cache, then run Ultralytics CLI."""
         dataset_text = self.dataset_edit.text().strip()
         classes_text = self.classes_edit.text().strip()
         if not dataset_text or not classes_text:
@@ -310,6 +305,12 @@ Ctrl+Q        Quit
 
         dataset_dir = Path(dataset_text)
         classes_path = Path(classes_text)
+        if not dataset_dir.exists():
+            QtWidgets.QMessageBox.warning(self, "Missing data", "The dataset folder does not exist.")
+            return
+        if not classes_path.exists():
+            QtWidgets.QMessageBox.warning(self, "Missing classes", "The classes file does not exist.")
+            return
         data_yaml = self.prepare_dataset(dataset_dir, classes_path)
         if data_yaml is None:
             return
@@ -338,6 +339,7 @@ Ctrl+Q        Quit
             f"device={device}",
         ]
 
+        # Reset UI state before launching training.
         self.log_view.clear()
         self.log("Starting training...")
         self.log(f"Working dir: {Path.cwd()}")
@@ -356,6 +358,7 @@ Ctrl+Q        Quit
             self.stop_button.setEnabled(False)
 
     def stop_training(self) -> None:
+        """Stop the training subprocess gracefully, then force kill if needed."""
         if self.process.state() != QtCore.QProcess.NotRunning:
             self.log("Stopping training...")
             self.process.terminate()
@@ -448,9 +451,7 @@ def create_splash() -> QtWidgets.QSplashScreen:
     painter.setFont(QtGui.QFont("Segoe UI", 14, QtGui.QFont.Bold))
     painter.drawText(splash_pix.rect(), QtCore.Qt.AlignTop | QtCore.Qt.AlignHCenter, WINDOW_TITLE)
 
-    logo = load_logo_file_pixmap()
-    if logo is None:
-        logo = logo_pixmap(QtGui.QColor("#000000"))
+    logo = logo_pixmap(QtGui.QColor("#000000"))
     scaled_logo = logo.scaled(174, 174, QtCore.Qt.KeepAspectRatio, QtCore.Qt.SmoothTransformation)
     logo_x = (splash_pix.width() - scaled_logo.width()) // 2
     logo_y = 100

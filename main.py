@@ -26,7 +26,6 @@ CAPTURE_DIR = Path("captures")
 NULL_DIR = CAPTURE_DIR / "null"
 CLASSES_PATH = Path("classes.txt")
 CLASS_COLORS_PATH = Path("class_colors.json")
-LOGO_FILE = Path("logo.bmp")
 ICON_FILE = Path("captureIcon.ico")
 if getattr(sys, "frozen", False):
     build_source = Path(sys.executable)
@@ -251,33 +250,6 @@ def logo_pixmap(color: QtGui.QColor = QtGui.QColor("#00ff7f")) -> QtGui.QPixmap:
     return QtGui.QPixmap.fromImage(img)
 
 
-def load_logo_file_pixmap() -> Optional[QtGui.QPixmap]:
-    """Load logo.bmp if available (supports PyInstaller frozen paths) and strip white background."""
-    # Cache to avoid reprocessing per splash creation.
-    if getattr(load_logo_file_pixmap, "_cache", None) is not None:
-        return load_logo_file_pixmap._cache  # type: ignore[attr-defined]
-    try:
-        base = Path(sys._MEIPASS) if getattr(sys, "frozen", False) else Path.cwd()
-    except Exception:
-        base = Path.cwd()
-    logo_path = base / LOGO_FILE.name
-    if logo_path.exists():
-        pix = QtGui.QPixmap(str(logo_path))
-        if not pix.isNull():
-            # Convert pure white to transparent so the logo sits cleanly on the splash.
-            img = pix.toImage().convertToFormat(QtGui.QImage.Format_ARGB32)
-            white = QtGui.QColor(255, 255, 255)
-            for y in range(img.height()):
-                for x in range(img.width()):
-                    if img.pixelColor(x, y) == white:
-                        img.setPixelColor(x, y, QtGui.QColor(255, 255, 255, 0))
-            processed = QtGui.QPixmap.fromImage(img)
-            load_logo_file_pixmap._cache = processed  # type: ignore[attr-defined]
-            return processed
-    load_logo_file_pixmap._cache = None  # type: ignore[attr-defined]
-    return None
-
-
 def load_app_icon() -> Optional[QtGui.QIcon]:
     """Load the app icon (programLogo.ico) with PyInstaller support."""
     try:
@@ -322,6 +294,7 @@ def annotate_image(
         print(f"Could not load image for annotation: {image_path}")
         return "cancel"
 
+    # Window title helps the user confirm which image is being labeled.
     window_name = f"Annotate: {image_path.name}"
     boxes: List[List[Optional[int]]] = []  # [x1, y1, x2, y2, class_id or None]
     if initial_boxes:
@@ -348,6 +321,7 @@ def annotate_image(
     pan_y = 0.0
     pan_active = False
     pan_start_view: Optional[Tuple[int, int]] = None
+    # Store view state as (view width, view height, center x, center y).
     current_view_params: Tuple[float, float, float, float] = (
         float(img_width),
         float(img_height),
@@ -355,15 +329,18 @@ def annotate_image(
         float(img_height) / 2.0,
     )
 
+    # Clamp a point so we never access outside the image.
     def clamp_point(x: float, y: float) -> Tuple[int, int]:
         return int(max(0, min(round(x), img_width - 1))), int(max(0, min(round(y), img_height - 1)))
 
+    # Convert view coordinates into image coordinates.
     def view_to_image_coords(vx: int, vy: int) -> Tuple[int, int]:
         roi_w, roi_h, cx, cy = current_view_params
         img_x = (vx / img_width) * roi_w + (cx - roi_w / 2.0)
         img_y = (vy / img_height) * roi_h + (cy - roi_h / 2.0)
         return clamp_point(img_x, img_y)
 
+    # Zoom while keeping the mouse position anchored.
     def adjust_zoom(direction: int, vx: int, vy: int) -> None:
         nonlocal zoom_factor, pan_x, pan_y
         if direction == 0:
@@ -386,6 +363,7 @@ def annotate_image(
 
     def on_mouse(event, x, y, flags, param):  # noqa: ANN001 - OpenCV callback signature
         nonlocal drawing, start_point, current_point, boxes, selected_index, pending_class_choice, pan_active, pan_start_view, pan_x, pan_y
+        # Left mouse button starts drawing a new box.
         if event == cv2.EVENT_LBUTTONDOWN:
             drawing = True
             start_point = view_to_image_coords(x, y)
@@ -403,6 +381,7 @@ def annotate_image(
                 pending_class_choice = None
             start_point = None
             current_point = None
+        # Middle mouse button pans the view.
         elif event == cv2.EVENT_MBUTTONDOWN:
             pan_active = True
             pan_start_view = (x, y)
@@ -410,7 +389,7 @@ def annotate_image(
             pan_active = False
             pan_start_view = None
         elif event == cv2.EVENT_MOUSEMOVE and pan_active and pan_start_view:
-            # Convert drag delta from view space to image-space pan.
+            # Convert drag delta from view to image space.
             dx_view = x - pan_start_view[0]
             dy_view = y - pan_start_view[1]
             roi_w, roi_h, _, _ = current_view_params
@@ -433,7 +412,7 @@ def annotate_image(
             safe_destroy_window(window_name)
             return "cancel"
 
-        # Apply zoom/pan on the base image only; draw overlays after scaling so text/boxes stay crisp.
+        # Apply zoom/pan to the base image; draw overlays after scaling.
         roi_w = int(round(img_width / zoom_factor))
         roi_h = int(round(img_height / zoom_factor))
         roi_w = max(1, min(img_width, roi_w))
@@ -449,6 +428,7 @@ def annotate_image(
         roi = cv2.getRectSubPix(image, (roi_w, roi_h), (cx, cy))
         view = cv2.resize(roi, (img_width, img_height), interpolation=cv2.INTER_LINEAR)
 
+        # Convert image coordinates to view coordinates for drawing overlays.
         def img_to_view(ix: int, iy: int) -> Tuple[int, int]:
             vx = int(round((ix - (cx - roi_w / 2.0)) * (img_width / roi_w)))
             vy = int(round((iy - (cy - roi_h / 2.0)) * (img_height / roi_h)))
@@ -522,7 +502,7 @@ def annotate_image(
             )
 
         cv2.imshow(window_name, view)
-        # waitKeyEx preserves extended key codes (e.g., arrow keys)
+        # waitKeyEx preserves extended key codes (e.g., arrow keys).
         key = cv2.waitKeyEx(30)
 
         if key == ord("s"):
@@ -1167,6 +1147,7 @@ Middle drag   Pan
             self.timer.stop()
             return
 
+        # Store the latest camera frame so the capture button can save it.
         self.current_frame = frame
         frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
 
@@ -1181,6 +1162,7 @@ Middle drag   Pan
 
     def closeEvent(self, event: QtGui.QCloseEvent) -> None:  # type: ignore[override]
         """Release the camera when the window closes to free the device."""
+        # Pause the live feed while we handle capture + labeling.
         self.timer.stop()
         if self.cap.isOpened():
             self.cap.release()
@@ -1220,10 +1202,10 @@ Middle drag   Pan
             self.status_label.setText("No frame available yet.")
             return
 
-        # Pause the live feed while we handle capture + labeling, so nothing runs in the background.
         self.timer.stop()
         self.capture_button.setEnabled(False)
 
+        # Always save into the captures folder using a timestamp so files never clash.
         CAPTURE_DIR.mkdir(parents=True, exist_ok=True)
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
         image_path = CAPTURE_DIR / f"capture_{timestamp}.jpg"
@@ -1237,6 +1219,7 @@ Middle drag   Pan
 
         self.status_label.setText(f"Saved {image_path.name}. Please label it.")
 
+        # Force the label step so we never keep unlabeled images around.
         result = annotate_image(image_path, self.classes, self.class_colors)
         if result == "saved":
             self.status_label.setText(f"Labeled {image_path.name}.")
@@ -1244,6 +1227,7 @@ Middle drag   Pan
             NULL_DIR.mkdir(parents=True, exist_ok=True)
             dest = NULL_DIR / image_path.name
             try:
+                # "Null" means no defects; move the image away from training data.
                 image_path.replace(dest)
                 image_path.with_suffix(".txt").unlink(missing_ok=True)
                 try:
@@ -1500,9 +1484,7 @@ def main() -> None:
     painter.drawText(splash_pix.rect(), QtCore.Qt.AlignTop | QtCore.Qt.AlignHCenter, WINDOW_TITLE)
 
     # Large white logo in center
-    logo = load_logo_file_pixmap()
-    if logo is None:
-        logo = logo_pixmap(QtGui.QColor("#000000"))
+    logo = logo_pixmap(QtGui.QColor("#000000"))
     scaled_logo = logo.scaled(174, 174, QtCore.Qt.KeepAspectRatio, QtCore.Qt.SmoothTransformation)
     logo_x = (splash_pix.width() - scaled_logo.width()) // 2
     logo_y = 100

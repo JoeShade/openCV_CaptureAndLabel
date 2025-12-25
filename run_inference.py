@@ -35,7 +35,6 @@ try:
     BUILD_DATE = datetime.fromtimestamp(build_source.stat().st_mtime).strftime("%d/%m/%Y")
 except OSError:
     BUILD_DATE = datetime.now().strftime("%d/%m/%Y")
-LOGO_FILE = Path("logo.bmp")
 ICON_FILE = Path("runIcon.ico")
 CLASS_COLORS_PATH = Path("class_colors.json")
 CAPTURE_DIR = Path("captures")
@@ -70,33 +69,6 @@ def load_class_colors(path: Path = CLASS_COLORS_PATH):
         return list(DEFAULT_CLASS_COLORS)
 
 
-def load_logo_file_pixmap() -> Optional[QtGui.QPixmap]:
-    """Load logo.bmp if available and strip white background."""
-    if getattr(load_logo_file_pixmap, "_cache", None) is not None:
-        return load_logo_file_pixmap._cache  # type: ignore[attr-defined]
-
-    if getattr(sys, "frozen", False):
-        base = Path(sys.executable).resolve().parent
-    else:
-        base = Path(__file__).resolve().parent
-    logo_path = base / LOGO_FILE.name
-    if logo_path.exists():
-        pix = QtGui.QPixmap(str(logo_path))
-        if not pix.isNull():
-            image = pix.toImage().convertToFormat(QtGui.QImage.Format_ARGB32)
-            white = QtGui.QColor(255, 255, 255)
-            for y in range(image.height()):
-                for x in range(image.width()):
-                    if image.pixelColor(x, y) == white:
-                        image.setPixelColor(x, y, QtGui.QColor(255, 255, 255, 0))
-            processed = QtGui.QPixmap.fromImage(image)
-            load_logo_file_pixmap._cache = processed  # type: ignore[attr-defined]
-            return processed
-
-    load_logo_file_pixmap._cache = None  # type: ignore[attr-defined]
-    return None
-
-
 def load_app_icon() -> Optional[QtGui.QIcon]:
     """Load the app icon (runIcon.ico) with PyInstaller support."""
     try:
@@ -116,6 +88,7 @@ def load_app_icon() -> Optional[QtGui.QIcon]:
 
 
 def create_splash() -> QtWidgets.QSplashScreen:
+    """Create a simple splash screen so the user sees activity on startup."""
     splash_pix = QtGui.QPixmap(460, 420)
     splash_pix.fill(QtGui.QColor("#f0f0f0"))
     painter = QtGui.QPainter(splash_pix)
@@ -123,15 +96,7 @@ def create_splash() -> QtWidgets.QSplashScreen:
     painter.setFont(QtGui.QFont("Segoe UI", 18, QtGui.QFont.Bold))
     painter.drawText(splash_pix.rect(), QtCore.Qt.AlignTop | QtCore.Qt.AlignHCenter, WINDOW_TITLE)
 
-    logo = load_logo_file_pixmap()
-    if logo is not None:
-        scaled_logo = logo.scaled(174, 174, QtCore.Qt.KeepAspectRatio, QtCore.Qt.SmoothTransformation)
-        logo_x = (splash_pix.width() - scaled_logo.width()) // 2
-        logo_y = 100
-        painter.drawPixmap(logo_x, logo_y, scaled_logo)
-        text_y = logo_y + scaled_logo.height() + 20
-    else:
-        text_y = 120
+    text_y = 120
 
     painter.setFont(QtGui.QFont("Segoe UI", 12))
     text_height = max(40, splash_pix.height() - text_y - 20)
@@ -172,6 +137,7 @@ def draw_text_with_bg(
     """Render text with a solid background for readability."""
     global cv2
     if cv2 is None:
+        # Import here to avoid DLL conflicts between OpenCV and PyTorch on Windows.
         import cv2 as _cv2
         cv2 = _cv2
     if font is None:
@@ -197,6 +163,7 @@ def enumerate_cameras(max_index: int = 5):
 
 
 def open_camera(index: int):
+    """Open a camera index and return a capture handle."""
     global cv2
     if cv2 is None:
         import cv2 as _cv2
@@ -210,6 +177,7 @@ class InferenceWindow(QtWidgets.QWidget):
         super().__init__()
         self.setWindowTitle(WINDOW_TITLE)
 
+        # Tracking fields for camera, model, and UI state.
         self.cap: Optional[cv2.VideoCapture] = None
         self.camera_index = 0
         self.model = None
@@ -223,6 +191,7 @@ class InferenceWindow(QtWidgets.QWidget):
         self._gpu_available = False
         self._torch_ok = False
         self.class_colors = load_class_colors()
+        # Detect system capabilities and pre-load heavy libs.
         self._init_gpu_info()
         self._preload_torch()
         self._import_cv2()
@@ -301,6 +270,7 @@ class InferenceWindow(QtWidgets.QWidget):
         layout.addWidget(self.status_label)
         self.setLayout(layout)
 
+        # Timer drives the capture loop without blocking the GUI.
         self.timer = QtCore.QTimer(self)
         self.timer.timeout.connect(self.update_frame)
         self.timer.start(33)  # ~30 FPS
@@ -317,6 +287,7 @@ class InferenceWindow(QtWidgets.QWidget):
             self.status_label.setText("Unable to open camera.")
 
     def populate_camera_selector(self):
+        """Refresh the camera dropdown with available devices."""
         cams = enumerate_cameras()
         if not cams:
             cams = [self.camera_index]
@@ -332,6 +303,7 @@ class InferenceWindow(QtWidgets.QWidget):
         self.camera_selector.blockSignals(False)
 
     def change_camera(self, idx):
+        """Swap to a new camera index when the user changes the dropdown."""
         new_index = self.camera_selector.itemData(idx)
         if new_index is None or new_index == self.camera_index:
             return
@@ -345,6 +317,7 @@ class InferenceWindow(QtWidgets.QWidget):
             self.status_label.setText(f"Switched to camera {new_index}.")
 
     def browse_model(self):
+        """Open a file dialog and load the selected model."""
         path, _ = QtWidgets.QFileDialog.getOpenFileName(self, "Select model file", filter="Model Files (*.pt)")
         if path:
             self.model_path_edit.setText(path)
@@ -352,6 +325,9 @@ class InferenceWindow(QtWidgets.QWidget):
 
     def load_model(self, path: Path):
         """Load a YOLO model with defensive error handling."""
+        if not path.exists():
+            self._show_error("Missing model", f"Model file not found:\n{path}")
+            return
         if not self._torch_ok:
             self._show_error(
                 "Dependency missing",
@@ -378,6 +354,7 @@ class InferenceWindow(QtWidgets.QWidget):
             self.model_names = {}
 
     def update_frame(self):
+        """Grab a frame, run inference if a model is loaded, and display results."""
         global cv2
         if not self.cap or not self.cap.isOpened():
             return
@@ -388,6 +365,7 @@ class InferenceWindow(QtWidgets.QWidget):
 
         if self.model:
             try:
+                # YOLO returns a list of results; we only need the first entry for a single frame.
                 results = self.model(frame, verbose=False, imgsz=640, device=self.device_choice)[0]
                 frame = self.draw_detections(frame, results)
             except Exception as exc:
@@ -399,7 +377,7 @@ class InferenceWindow(QtWidgets.QWidget):
             telemetry_lines = self.build_telemetry_lines()
             frame = self.draw_overlay_text(frame, telemetry_lines)
 
-        # Convert to Qt
+        # Convert to Qt so the QLabel can display the image.
         self.current_frame = frame
         self.last_display_frame = frame.copy()
         frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
@@ -410,6 +388,7 @@ class InferenceWindow(QtWidgets.QWidget):
         self.video_label.setPixmap(pixmap.scaled(self.video_label.size(), QtCore.Qt.KeepAspectRatio, QtCore.Qt.SmoothTransformation))
 
     def draw_detections(self, frame, results):
+        """Draw boxes and labels for each detection."""
         global cv2
         boxes = getattr(results, "boxes", None)
         if boxes is None:
@@ -457,6 +436,7 @@ Q             Quit
         msg.exec_()
 
     def toggle_telemetry(self) -> None:
+        """Show or hide the FPS/CPU/RAM overlay."""
         self.telemetry_visible = not self.telemetry_visible
         state = "shown" if self.telemetry_visible else "hidden"
         self.status_label.setText(f"Telemetry {state}.")
@@ -466,6 +446,7 @@ Q             Quit
         if self.last_display_frame is None:
             self.status_label.setText("No frame available yet.")
             return
+        # Store screenshots under captures/inference for easy cleanup.
         INFERENCE_DIR.mkdir(parents=True, exist_ok=True)
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
         image_path = INFERENCE_DIR / f"capture_{timestamp}.jpg"
@@ -476,6 +457,7 @@ Q             Quit
             self.status_label.setText("Failed to save capture.")
 
     def update_fps(self) -> None:
+        """Maintain a smoothed FPS value so the overlay is stable."""
         now = time.time()
         dt = now - self.last_frame_time
         if dt > 0:
@@ -484,12 +466,14 @@ Q             Quit
         self.last_frame_time = now
 
     def build_telemetry_lines(self):
+        """Read current CPU/RAM/GPU usage for on-screen display."""
         cpu = psutil.cpu_percent(interval=None)
         mem = psutil.virtual_memory().percent
         gpu = "N/A"
         vram = "N/A"
         if self._gpu_available:
             try:
+                # pynvml is optional; if it isn't available we fall back to N/A.
                 with warnings.catch_warnings():
                     warnings.filterwarnings(
                         "ignore",
@@ -514,6 +498,7 @@ Q             Quit
         ]
 
     def draw_overlay_text(self, frame, lines):
+        """Draw multiple text lines with spacing so they don't overlap."""
         y = 20
         for line in lines:
             draw_text_with_bg(frame, line, (10, y), font_scale=0.6, color=(0, 255, 0), thickness=1, bg_color=(0, 0, 0))

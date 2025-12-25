@@ -37,6 +37,10 @@ Each module is designed to be camera-agnostic and file-system-based to minimise 
 - OpenCV Python bindings (`opencv-python`, which installs `numpy`)
 - PyQt5 (GUI toolkit for capture, training, and inference apps)
 - Ultralytics (`ultralytics`) for YOLOv8 training and inference
+- PyTorch (`torch`) for model loading and inference (required by Ultralytics)
+- psutil (system telemetry in the inference viewer)
+- Optional: `pynvml` for NVIDIA GPU telemetry (inference viewer)
+- Optional: `pyinstaller` for packaging into a Windows executable
 
 ### Recommended local setup
 - Create and use a dedicated venv named `.venv312` to avoid interpreter mismatches: `py -3.12 -m venv .venv312` then `.\.venv312\Scripts\activate`.
@@ -55,7 +59,7 @@ py -3.12 -m venv .venv312
 
 # Upgrade pip and install wheel-only builds to avoid compiling
 pip install --upgrade pip
-pip install --only-binary=:all: "numpy<2.3.0" "opencv-python<4.13" pyqt5 ultralytics
+pip install --only-binary=:all: "numpy<2.3.0" "opencv-python<4.13" pyqt5 ultralytics torch psutil pynvml
 ```
 
 ---
@@ -226,6 +230,12 @@ It is not intended for production inspection systems or safety-critical use.
 python main.py --camera 0
 ```
 
+### Run with explicit resolution
+```powershell
+.\.venv312\Scripts\activate
+python main.py --camera 0 --width 1280 --height 720
+```
+
 ### Train (YOLOv8 UI)
 ```powershell
 .\.venv312\Scripts\activate
@@ -247,7 +257,6 @@ pyinstaller --name OpenCVCapture --noconfirm --onedir -w main.py `
   --add-data "classes.txt;." `
   --add-data "class_colors.json;." `
   --add-data "captures;captures" `
-  --add-data "logo.bmp;." `
   --add-data "programLogo.ico;." `
   --add-data "$Env:VIRTUAL_ENV\Lib\site-packages\PyQt5\Qt5\plugins;PyQt5\Qt5\plugins"
 ```
@@ -283,4 +292,16 @@ N             Mark null
 Q / ESC       Cancel labeling
 Scroll        Zoom
 Middle drag   Pan
+```
+
+**Inference window**
+```
+C             Capture screenshot
+H             Toggle telemetry overlay
+Q             Quit
+```
+
+**Training window**
+```
+Ctrl+Q        Quit
 ```
