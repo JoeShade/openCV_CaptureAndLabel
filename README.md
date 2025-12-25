@@ -1,13 +1,15 @@
-# OpenCV based image capture and labelling for training YOLO object detection neural networks
+# OpenCV capture, labeling, training, and inference for YOLO object detection
 ## Overview
 
-This project implements a **lightweight image capture and annotation pipeline** for generating object-detection datasets. The system is designed to operate in a **controlled, offline imaging setup** and to integrate directly with OpenCV-based workflows and modern deep-learning training pipelines (e.g. YOLO).
+This project implements a **lightweight image capture, annotation, training, and inference toolkit** for object-detection workflows. The system is designed to operate in a **controlled, offline imaging setup** and to integrate directly with OpenCV-based workflows and modern deep-learning pipelines (e.g. YOLOv8).
 
 The tool combines:
 - Direct camera capture
 - Interactive bounding-box annotation
 - Structured dataset export
 - Basic dataset validation utilities
+- A training companion for YOLOv8
+- A live inference viewer for quick model checks
 
 The emphasis is on **simplicity, transparency, and reproducibility**, rather than real-time performance or industrial deployment.
 
@@ -21,6 +23,8 @@ The system is structured as a small number of loosely coupled modules:
 2. Annotation UI  
 3. Dataset Storage Layer  
 4. Dataset Audit Utilities  
+5. Training Companion App  
+6. Inference Viewer App  
 
 Each module is designed to be camera-agnostic and file-system-based to minimise external dependencies.
 
@@ -31,10 +35,12 @@ Each module is designed to be camera-agnostic and file-system-based to minimise 
 - Python 3.12 (recommended to use prebuilt wheels for NumPy and OpenCV)
 - pip
 - OpenCV Python bindings (`opencv-python`, which installs `numpy`)
+- PyQt5 (GUI toolkit for capture, training, and inference apps)
+- Ultralytics (`ultralytics`) for YOLOv8 training and inference
 
 ### Recommended local setup
 - Create and use a dedicated venv named `.venv312` to avoid interpreter mismatches: `py -3.12 -m venv .venv312` then `.\.venv312\Scripts\activate`.
-- Install packages inside it: `pip install --upgrade pip` then `pip install --only-binary=:all: "numpy<2.3.0" "opencv-python<4.13" pyqt5`.
+- Install packages inside it: `pip install --upgrade pip` then `pip install --only-binary=:all: "numpy<2.3.0" "opencv-python<4.13" pyqt5 ultralytics`.
 - VS Code users: set the interpreter to `.venv312/Scripts/python.exe` (workspace setting already included in `.vscode/settings.json`). Terminals still need `.\.venv312\Scripts\activate` before running `python main.py`.
 
 ### Install Python 3.12 on Windows
@@ -49,7 +55,7 @@ py -3.12 -m venv .venv312
 
 # Upgrade pip and install wheel-only builds to avoid compiling
 pip install --upgrade pip
-pip install --only-binary=:all: "numpy<2.3.0" "opencv-python<4.13"
+pip install --only-binary=:all: "numpy<2.3.0" "opencv-python<4.13" pyqt5 ultralytics
 ```
 
 ---
@@ -159,14 +165,41 @@ Key integration features:
 - Deterministic filenames for reproducible splits
 - Support for dataset partitioning based on tool, part geometry, or capture session
 
-The capture and annotation codebase is deliberately decoupled from any specific training implementation.
+The capture and annotation codebase is deliberately decoupled from any specific training implementation, while the companion tools provide a short path into YOLOv8.
+
+---
+
+## Training Companion (YOLOv8)
+
+The training UI (`train_model.py`) provides a guided path to start YOLOv8 training without writing scripts:
+
+- Select a dataset folder and `classes.txt`
+- Auto-build a temporary YOLO dataset structure and YAML
+- 80/20 train/validation split with deterministic shuffling
+- Launch the Ultralytics CLI with configurable model size, image size, epochs, and device
+- Live logs with basic ETA parsing
+
+The prepared dataset lives under `.yolo_training_cache/` inside the selected dataset folder.
+
+---
+
+## Inference Viewer
+
+The inference UI (`run_inference.py`) provides a live camera preview with YOLOv8 detections:
+
+- Select a camera and model file
+- Run inference on live frames
+- Render bounding boxes, class labels, and confidences
+- Switch CPU/GPU (if available) from the UI
+
+This tool is intended for quick sanity checks and demoing models, not for production deployment.
 
 ---
 
 ## Limitations
 
 - Annotation is fully manual
-- No real-time inference or deployment functionality
+- Inference is for visualization and validation only (not optimized for production)
 - No automated defect proposal or pre-labelling
 - Image quality and defect visibility depend on external hardware and lighting
 
@@ -191,6 +224,18 @@ It is not intended for production inspection systems or safety-critical use.
 ```powershell
 .\.venv312\Scripts\activate
 python main.py --camera 0
+```
+
+### Train (YOLOv8 UI)
+```powershell
+.\.venv312\Scripts\activate
+python train_model.py
+```
+
+### Inference (YOLOv8 UI)
+```powershell
+.\.venv312\Scripts\activate
+python run_inference.py
 ```
 
 ### Build (PyInstaller, windowless)
