@@ -10,6 +10,7 @@ import os
 import sys
 import time
 import warnings
+from datetime import datetime
 from pathlib import Path
 from typing import Dict, Optional
 
@@ -28,7 +29,17 @@ from PyQt5 import QtCore, QtGui, QtWidgets
 # cv2 is imported lazily after torch preload to avoid OpenMP conflicts on Windows.
 cv2 = None
 
+WINDOW_TITLE = "View Inference"
+try:
+    build_source = Path(__file__).resolve()
+    BUILD_DATE = datetime.fromtimestamp(build_source.stat().st_mtime).strftime("%d/%m/%Y")
+except OSError:
+    BUILD_DATE = datetime.now().strftime("%d/%m/%Y")
+LOGO_FILE = Path("logo.bmp")
+ICON_FILE = Path("runIcon.ico")
 CLASS_COLORS_PATH = Path("class_colors.json")
+CAPTURE_DIR = Path("captures")
+INFERENCE_DIR = CAPTURE_DIR / "inference"
 DEFAULT_CLASS_COLORS = [
     (0, 255, 0),     # green
     (0, 200, 255),   # yellow-ish
@@ -57,6 +68,88 @@ def load_class_colors(path: Path = CLASS_COLORS_PATH):
         return colors or list(DEFAULT_CLASS_COLORS)
     except (json.JSONDecodeError, OSError, ValueError):
         return list(DEFAULT_CLASS_COLORS)
+
+
+def load_logo_file_pixmap() -> Optional[QtGui.QPixmap]:
+    """Load logo.bmp if available and strip white background."""
+    if getattr(load_logo_file_pixmap, "_cache", None) is not None:
+        return load_logo_file_pixmap._cache  # type: ignore[attr-defined]
+
+    if getattr(sys, "frozen", False):
+        base = Path(sys.executable).resolve().parent
+    else:
+        base = Path(__file__).resolve().parent
+    logo_path = base / LOGO_FILE.name
+    if logo_path.exists():
+        pix = QtGui.QPixmap(str(logo_path))
+        if not pix.isNull():
+            image = pix.toImage().convertToFormat(QtGui.QImage.Format_ARGB32)
+            white = QtGui.QColor(255, 255, 255)
+            for y in range(image.height()):
+                for x in range(image.width()):
+                    if image.pixelColor(x, y) == white:
+                        image.setPixelColor(x, y, QtGui.QColor(255, 255, 255, 0))
+            processed = QtGui.QPixmap.fromImage(image)
+            load_logo_file_pixmap._cache = processed  # type: ignore[attr-defined]
+            return processed
+
+    load_logo_file_pixmap._cache = None  # type: ignore[attr-defined]
+    return None
+
+
+def load_app_icon() -> Optional[QtGui.QIcon]:
+    """Load the app icon (runIcon.ico) with PyInstaller support."""
+    try:
+        base = Path(sys._MEIPASS) if getattr(sys, "frozen", False) else Path.cwd()
+    except Exception:
+        base = Path.cwd()
+    candidate_paths = [
+        base / ICON_FILE.name,
+        Path(sys.executable).parent / ICON_FILE.name if getattr(sys, "frozen", False) else None,
+    ]
+    for path in candidate_paths:
+        if path and path.exists():
+            icon = QtGui.QIcon(str(path))
+            if not icon.isNull():
+                return icon
+    return None
+
+
+def create_splash() -> QtWidgets.QSplashScreen:
+    splash_pix = QtGui.QPixmap(460, 420)
+    splash_pix.fill(QtGui.QColor("#f0f0f0"))
+    painter = QtGui.QPainter(splash_pix)
+    painter.setPen(QtGui.QColor("#000000"))
+    painter.setFont(QtGui.QFont("Segoe UI", 18, QtGui.QFont.Bold))
+    painter.drawText(splash_pix.rect(), QtCore.Qt.AlignTop | QtCore.Qt.AlignHCenter, WINDOW_TITLE)
+
+    logo = load_logo_file_pixmap()
+    if logo is not None:
+        scaled_logo = logo.scaled(174, 174, QtCore.Qt.KeepAspectRatio, QtCore.Qt.SmoothTransformation)
+        logo_x = (splash_pix.width() - scaled_logo.width()) // 2
+        logo_y = 100
+        painter.drawPixmap(logo_x, logo_y, scaled_logo)
+        text_y = logo_y + scaled_logo.height() + 20
+    else:
+        text_y = 120
+
+    painter.setFont(QtGui.QFont("Segoe UI", 12))
+    text_height = max(40, splash_pix.height() - text_y - 20)
+    footer_text = f"Loading {WINDOW_TITLE}...\nBuild: {BUILD_DATE} | JShade.co.uk"
+    painter.drawText(
+        0,
+        text_y,
+        splash_pix.width(),
+        text_height,
+        QtCore.Qt.AlignTop | QtCore.Qt.AlignHCenter,
+        footer_text,
+    )
+    painter.end()
+
+    splash = QtWidgets.QSplashScreen(splash_pix, QtCore.Qt.WindowStaysOnTopHint)
+    splash.show()
+    QtWidgets.QApplication.processEvents()
+    return splash
 
 
 def class_color(class_id: int, palette):
@@ -115,7 +208,7 @@ def open_camera(index: int):
 class InferenceWindow(QtWidgets.QWidget):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("YOLO Inference Viewer")
+        self.setWindowTitle(WINDOW_TITLE)
 
         self.cap: Optional[cv2.VideoCapture] = None
         self.camera_index = 0
@@ -124,6 +217,9 @@ class InferenceWindow(QtWidgets.QWidget):
         self.device_choice = "cpu"
         self.last_frame_time = time.time()
         self.fps = 0.0
+        self.current_frame = None
+        self.last_display_frame = None
+        self.telemetry_visible = True
         self._gpu_available = False
         self._torch_ok = False
         self.class_colors = load_class_colors()
@@ -140,6 +236,17 @@ class InferenceWindow(QtWidgets.QWidget):
         file_menu = self.menu_bar.addMenu("File")
         quit_action = file_menu.addAction("Quit")
         quit_action.triggered.connect(QtWidgets.qApp.quit)
+        help_menu = self.menu_bar.addMenu("Help")
+        about_action = help_menu.addAction("About")
+        about_action.triggered.connect(self.show_about)
+        keys_action = help_menu.addAction("Key Bindings")
+        keys_action.triggered.connect(self.show_key_bindings)
+        self.menu_bar.setStyleSheet(
+            "QMenuBar { background: #e6e6e6; color: black; }"
+            "QMenuBar::item { background: #e6e6e6; padding: 4px 10px; }"
+            "QMenuBar::item:selected { background: #d6d6d6; }"
+            "QMenu { background: #f0f0f0; color: black; }"
+        )
 
         self.camera_selector = QtWidgets.QComboBox()
         self.camera_selector.setSizeAdjustPolicy(QtWidgets.QComboBox.AdjustToContents)
@@ -161,6 +268,7 @@ class InferenceWindow(QtWidgets.QWidget):
         self.device_combo.currentIndexChanged.connect(self.change_device)
 
         nav_bar = QtWidgets.QWidget()
+        nav_bar.setStyleSheet("background: #e6e6e6;")
         nav_layout = QtWidgets.QHBoxLayout(nav_bar)
         nav_layout.setContentsMargins(0, 0, 0, 0)
         nav_layout.setSpacing(10)
@@ -180,6 +288,8 @@ class InferenceWindow(QtWidgets.QWidget):
         self.video_label.setMinimumSize(640, 480)
         self.video_label.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Expanding)
         self.video_label.setText("Select a model to start.")
+        self.capture_button = QtWidgets.QPushButton("Capture (C)")
+        self.capture_button.clicked.connect(self.capture_screenshot)
         self.status_label = QtWidgets.QLabel("Ready")
         self.status_label.setAlignment(QtCore.Qt.AlignCenter)
 
@@ -187,12 +297,20 @@ class InferenceWindow(QtWidgets.QWidget):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.addWidget(nav_bar)
         layout.addWidget(self.video_label)
+        layout.addWidget(self.capture_button)
         layout.addWidget(self.status_label)
         self.setLayout(layout)
 
         self.timer = QtCore.QTimer(self)
         self.timer.timeout.connect(self.update_frame)
         self.timer.start(33)  # ~30 FPS
+
+        self.capture_shortcut = QtWidgets.QShortcut(QtGui.QKeySequence("C"), self)
+        self.capture_shortcut.activated.connect(self.capture_screenshot)
+        self.telemetry_shortcut = QtWidgets.QShortcut(QtGui.QKeySequence("H"), self)
+        self.telemetry_shortcut.activated.connect(self.toggle_telemetry)
+        self.quit_shortcut = QtWidgets.QShortcut(QtGui.QKeySequence("Q"), self)
+        self.quit_shortcut.activated.connect(QtWidgets.qApp.quit)
 
         self.cap = open_camera(self.camera_index)
         if not self.cap or not self.cap.isOpened():
@@ -276,11 +394,14 @@ class InferenceWindow(QtWidgets.QWidget):
                 self.status_label.setText(f"Inference error: {exc}")
 
         # Overlay telemetry
-        self.update_fps()
-        telemetry_lines = self.build_telemetry_lines()
-        frame = self.draw_overlay_text(frame, telemetry_lines)
+        if self.telemetry_visible:
+            self.update_fps()
+            telemetry_lines = self.build_telemetry_lines()
+            frame = self.draw_overlay_text(frame, telemetry_lines)
 
         # Convert to Qt
+        self.current_frame = frame
+        self.last_display_frame = frame.copy()
         frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
         h, w, ch = frame_rgb.shape
         bytes_per_line = ch * w
@@ -315,6 +436,44 @@ class InferenceWindow(QtWidgets.QWidget):
         self.device_choice = "cpu" if "cpu" in choice else "0"
         if self.model:
             self.status_label.setText(f"Loaded model: {Path(self.model_path_edit.text()).name} | Device: {self.device_choice.upper()}")
+
+    def show_about(self) -> None:
+        QtWidgets.QMessageBox.information(self, "About", f"{WINDOW_TITLE}\nBuild date: {BUILD_DATE}")
+
+    def show_key_bindings(self) -> None:
+        html = """
+<b>Key Bindings</b>
+<pre>
+C             Capture screenshot
+H             Toggle telemetry
+Q             Quit
+</pre>
+"""
+        msg = QtWidgets.QMessageBox(self)
+        msg.setWindowTitle("Key Bindings")
+        msg.setText(html)
+        msg.setTextFormat(QtCore.Qt.RichText)
+        msg.setStandardButtons(QtWidgets.QMessageBox.Ok)
+        msg.exec_()
+
+    def toggle_telemetry(self) -> None:
+        self.telemetry_visible = not self.telemetry_visible
+        state = "shown" if self.telemetry_visible else "hidden"
+        self.status_label.setText(f"Telemetry {state}.")
+
+    def capture_screenshot(self) -> None:
+        global cv2
+        if self.last_display_frame is None:
+            self.status_label.setText("No frame available yet.")
+            return
+        INFERENCE_DIR.mkdir(parents=True, exist_ok=True)
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+        image_path = INFERENCE_DIR / f"capture_{timestamp}.jpg"
+        success = cv2.imwrite(str(image_path), self.last_display_frame)
+        if success:
+            self.status_label.setText(f"Captured {image_path.name}.")
+        else:
+            self.status_label.setText("Failed to save capture.")
 
     def update_fps(self) -> None:
         now = time.time()
@@ -433,9 +592,17 @@ class InferenceWindow(QtWidgets.QWidget):
 
 def main():
     app = QtWidgets.QApplication(sys.argv)
+    app_icon = load_app_icon()
+    if app_icon:
+        app.setWindowIcon(app_icon)
+    splash = create_splash()
+
     window = InferenceWindow()
+    if app_icon:
+        window.setWindowIcon(app_icon)
     window.resize(960, 720)
     window.show()
+    splash.finish(window)
     sys.exit(app.exec_())
 
 

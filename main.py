@@ -21,13 +21,13 @@ from PyQt5 import QtCore, QtGui, QtWidgets
 
 
 # Constants and configuration
-WINDOW_TITLE = "OpenCV Capture and Label"
+WINDOW_TITLE = "Capture and Label"
 CAPTURE_DIR = Path("captures")
 NULL_DIR = CAPTURE_DIR / "null"
 CLASSES_PATH = Path("classes.txt")
 CLASS_COLORS_PATH = Path("class_colors.json")
 LOGO_FILE = Path("logo.bmp")
-ICON_FILE = Path("programLogo.ico")
+ICON_FILE = Path("captureIcon.ico")
 if getattr(sys, "frozen", False):
     build_source = Path(sys.executable)
 else:
@@ -1510,7 +1510,7 @@ def main() -> None:
 
     # Footer text at bottom
     painter.setFont(QtGui.QFont("Segoe UI", 12, QtGui.QFont.Normal))
-    footer_text = f"Loading...\nBuild: {BUILD_DATE} | JShade.co.uk"
+    footer_text = f"Loading {WINDOW_TITLE}...\nBuild: {BUILD_DATE} | JShade.co.uk"
     text_y = logo_y + scaled_logo.height() + 20
     text_height = max(40, splash_pix.height() - text_y - 20)
     painter.drawText(

@@ -5,15 +5,21 @@ import random
 import shutil
 import sys
 import time
+from datetime import datetime
 from pathlib import Path
 from typing import List, Optional
 
 from PyQt5 import QtCore, QtGui, QtWidgets
 
 
-WINDOW_TITLE = "OpenCV Capture and Label - Model Trainer"
+WINDOW_TITLE = "Train Model"
+try:
+    build_source = Path(__file__).resolve()
+    BUILD_DATE = datetime.fromtimestamp(build_source.stat().st_mtime).strftime("%d/%m/%Y")
+except OSError:
+    BUILD_DATE = datetime.now().strftime("%d/%m/%Y")
 LOGO_FILE = Path("logo.bmp")
-ICON_FILE = Path("programLogo.ico")
+ICON_FILE = Path("trainIcon.ico")
 
 
 def logo_pixmap(color: QtGui.QColor = QtGui.QColor("#00ff7f")) -> QtGui.QPixmap:
@@ -97,6 +103,19 @@ class TrainingWindow(QtWidgets.QMainWindow):
         if ICON_FILE.exists():
             self.setWindowIcon(QtGui.QIcon(str(ICON_FILE)))
 
+        self.menu_bar = self.menuBar()
+        file_menu = self.menu_bar.addMenu("File")
+        quit_action = file_menu.addAction("Quit")
+        quit_action.triggered.connect(QtWidgets.qApp.quit)
+        help_menu = self.menu_bar.addMenu("Help")
+        about_action = help_menu.addAction("About")
+        about_action.triggered.connect(self.show_about)
+        keys_action = help_menu.addAction("Key Bindings")
+        keys_action.triggered.connect(self.show_key_bindings)
+
+        self.quit_shortcut = QtWidgets.QShortcut(QtGui.QKeySequence("Ctrl+Q"), self)
+        self.quit_shortcut.activated.connect(QtWidgets.qApp.quit)
+
         self.process = QtCore.QProcess(self)
         self.process.readyReadStandardOutput.connect(self.handle_stdout)
         self.process.readyReadStandardError.connect(self.handle_stderr)
@@ -158,13 +177,13 @@ class TrainingWindow(QtWidgets.QMainWindow):
 
         layout.addLayout(form)
 
+        self.eta_label = QtWidgets.QLabel("ETA: --:--")
+        layout.addWidget(self.eta_label)
+
         self.progress = QtWidgets.QProgressBar()
         self.progress.setRange(0, 1)
         self.progress.setValue(0)
         layout.addWidget(self.progress)
-
-        self.eta_label = QtWidgets.QLabel("ETA: --:--")
-        layout.addWidget(self.eta_label)
 
         self.log_view = QtWidgets.QPlainTextEdit()
         self.log_view.setReadOnly(True)
@@ -181,6 +200,27 @@ class TrainingWindow(QtWidgets.QMainWindow):
         layout.addLayout(button_row)
 
         self.resize(720, 640)
+
+    def show_about(self) -> None:
+        QtWidgets.QMessageBox.information(
+            self,
+            "About",
+            f"{WINDOW_TITLE}\nBuild date: {BUILD_DATE}",
+        )
+
+    def show_key_bindings(self) -> None:
+        html = """
+<b>Key Bindings</b>
+<pre>
+Ctrl+Q        Quit
+</pre>
+"""
+        msg = QtWidgets.QMessageBox(self)
+        msg.setWindowTitle("Key Bindings")
+        msg.setText(html)
+        msg.setTextFormat(QtCore.Qt.RichText)
+        msg.setStandardButtons(QtWidgets.QMessageBox.Ok)
+        msg.exec_()
 
     def browse_dataset(self) -> None:
         directory = QtWidgets.QFileDialog.getExistingDirectory(self, "Select dataset folder")
@@ -425,7 +465,7 @@ def create_splash() -> QtWidgets.QSplashScreen:
         splash_pix.width() - 40,
         text_height,
         QtCore.Qt.AlignTop | QtCore.Qt.AlignHCenter,
-        "Preparing training workspace...",
+        f"Loading Training Program...\nBuild date: {BUILD_DATE}",
     )
     painter.end()
 
